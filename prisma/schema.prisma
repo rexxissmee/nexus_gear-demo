@@ -1,0 +1,178 @@
+// Prisma Schema for Nexus Gear E-commerce
+// Converted from MySQL to PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==================== MODELS ====================
+
+// User model - Customers and Admins
+model User {
+  id             Int         @id @default(autoincrement())
+  firstName      String      @map("first_name") @db.VarChar(255)
+  lastName       String?     @map("last_name") @db.VarChar(255)
+  email          String      @unique @db.VarChar(255)
+  phone          String      @db.VarChar(255)
+  dateOfBirth    DateTime?   @map("date_of_birth") @db.Date
+  gender         String?     @db.VarChar(20)
+  password       String      @db.VarChar(255)
+  role           String      @default("user") @db.VarChar(50)
+  addressStreet  String?     @map("address_street") @db.VarChar(255)
+  addressWard    String?     @map("address_ward") @db.VarChar(255)
+  addressCity    String?     @map("address_city") @db.VarChar(255)
+  addressCountry String?     @map("address_country") @db.VarChar(255)
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  cartItems      CartItem[]
+  orders         Order[]
+  reviews        Review[]
+  wishlist       Wishlist[]
+
+  @@map("users")
+}
+
+// Category model - Product categories
+model Category {
+  id          Int       @id @default(autoincrement())
+  name        String    @db.VarChar(255)
+  description String?   @db.Text
+  status      String    @default("active") @db.VarChar(20)
+  createdAt   DateTime? @map("created_at") @db.Date
+
+  // Relations
+  products    Product[]
+
+  @@map("categories")
+}
+
+// Product model - Items for sale
+model Product {
+  id             Int       @id @default(autoincrement())
+  name           String    @db.VarChar(255)
+  description    String?   @db.Text
+  price          Decimal   @db.Decimal(10, 2)
+  originalPrice  Decimal?  @map("original_price") @db.Decimal(10, 2)
+  thumbnail      String?   @db.VarChar(255)
+  stock          Int       @default(0)
+  categoryId     Int?      @map("category_id")
+  averageRating  Decimal   @default(0) @map("average_rating") @db.Decimal(3, 2)
+  reviewCount    Int       @default(0) @map("review_count")
+  isFeatured     Boolean   @default(false) @map("is_featured")
+  isOnSale       Boolean   @default(false) @map("is_on_sale")
+  isNewArrival   Boolean   @default(false) @map("is_new_arrival")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  category       Category?      @relation(fields: [categoryId], references: [id])
+  cartItems      CartItem[]
+  orderDetails   OrderDetail[]
+  reviews        Review[]
+  images         ProductImage[]
+  wishlist       Wishlist[]
+
+  @@map("products")
+}
+
+// CartItem model - Shopping cart items
+model CartItem {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  productId Int      @map("product_id")
+  quantity  Int      @default(1)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@map("cart_items")
+}
+
+// Order model - Customer orders
+model Order {
+  id         Int       @id @default(autoincrement())
+  userId     Int?      @map("user_id")
+  orderCode  String    @unique @map("order_code") @db.VarChar(255)
+  note       String?   @db.Text
+  status     String    @default("pending") @db.VarChar(100)
+  subtotal   Decimal?  @db.Decimal(10, 2)
+  taxFee     Decimal?  @map("tax_fee") @db.Decimal(10, 2)
+  total      Decimal?  @db.Decimal(10, 2)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  user         User?          @relation(fields: [userId], references: [id])
+  orderDetails OrderDetail[]
+
+  @@map("orders")
+}
+
+// OrderDetail model - Items in each order
+model OrderDetail {
+  id        Int      @id @default(autoincrement())
+  orderId   Int?     @map("order_id")
+  productId Int?     @map("product_id")
+  price     Decimal? @db.Decimal(10, 2)
+  quantity  Int?
+  subtotal  Decimal? @db.Decimal(10, 2)
+
+  // Relations
+  order     Order?   @relation(fields: [orderId], references: [id])
+  product   Product? @relation(fields: [productId], references: [id])
+
+  @@map("order_details")
+}
+
+// Review model - Product reviews
+model Review {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  productId Int      @map("product_id")
+  rating    Int      @db.SmallInt
+  comment   String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@map("reviews")
+}
+
+// ProductImage model - Additional product images
+model ProductImage {
+  id        Int     @id @default(autoincrement())
+  imageUrl  String  @map("image_url") @db.VarChar(255)
+  productId Int?    @map("product_id")
+
+  // Relations
+  product   Product? @relation(fields: [productId], references: [id])
+
+  @@map("product_images")
+}
+
+// Wishlist model - User's saved products
+model Wishlist {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  productId Int      @map("product_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@map("wishlist")
+}
