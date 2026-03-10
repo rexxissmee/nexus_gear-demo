@@ -13,7 +13,7 @@ const nextConfig = {
     '',
   ],
   images: {
-    unoptimized: true,
+    unoptimized: false,
   },
   async rewrites() {
     const projectBase = path.basename(process.cwd())

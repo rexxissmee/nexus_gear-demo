@@ -35,7 +35,7 @@ export default function ProfileInfoPage() {
           <CardContent className="space-y-6">
             <div className="flex items-center space-x-4">
               <div className="w-16 h-16 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-white">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-user-round-icon lucide-user-round"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-user-round-icon lucide-user-round"><circle cx="12" cy="8" r="5" /><path d="M20 21a8 8 0 0 0-16 0" /></svg>
               </div>
               <div>
                 <h3 className="text-xl font-semibold">{user ? `${user.first_name ?? ''} ${user.last_name ?? ''}`.trim() : 'User'}</h3>
@@ -60,7 +60,11 @@ export default function ProfileInfoPage() {
                 </div>
                 <div>
                   <label className="text-sm font-medium text-gray-500 dark:text-gray-400">Date of Birth</label>
-                  <p className="text-gray-900 dark:text-white font-medium">{user?.date_of_birth || '-'}</p>
+                  <p className="text-gray-900 dark:text-white font-medium">
+                    {user?.date_of_birth
+                      ? new Date(user.date_of_birth).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })
+                      : '-'}
+                  </p>
                 </div>
               </div>
               <div className="space-y-4">

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import bcrypt from 'bcryptjs'
+import { createSession } from '@/lib/session'
+import { logEvent } from '@/lib/event-logger'
 
 export async function POST(request: NextRequest) {
   try {
@@ -36,9 +38,29 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: ['Invalid email or password.'] }, { status: 401 })
     }
 
+    // Get client metadata for non-PII bucketing
+    const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+      || request.headers.get('x-real-ip')
+      || ''
+    const ua = request.headers.get('user-agent') || ''
+
+    // Create JWT session
+    const { token, sessionId, expiresAt } = await createSession({
+      userId: user.id,
+      role: user.role,
+      rotationEnabled: true,
+      ip,
+      ua,
+    })
+
+    // Log AUTH_LOGIN_SUCCESS
+    await logEvent(sessionId, 'AUTH_LOGIN_SUCCESS', {}, {
+      endpoint_group: 'auth',
+      status_group: '2xx',
+    }, { rotation_enabled: true })
+
     // Return user data (exclude password)
     const { password: _, ...userWithoutPassword } = user
-
     const userData = {
       id: userWithoutPassword.id,
       first_name: userWithoutPassword.firstName,
@@ -56,11 +78,31 @@ export async function POST(request: NextRequest) {
       updated_at: userWithoutPassword.updatedAt,
     }
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       message: 'Login successful.',
       user: userData,
+      sessionId,
+      expiresAt: expiresAt.toISOString(),
     })
+
+    // Set httpOnly session cookie (non-JS accessible)
+    response.cookies.set('session_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      expires: expiresAt,
+    })
+    response.cookies.set('session_id', sessionId, {
+      httpOnly: false, // readable by client for API calls
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      expires: expiresAt,
+    })
+
+    return response
   } catch (error) {
     console.error('POST /api/login error:', error)
     return NextResponse.json(
@@ -69,3 +111,4 @@ export async function POST(request: NextRequest) {
     )
   }
 }
+

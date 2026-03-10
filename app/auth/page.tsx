@@ -63,7 +63,7 @@ function LoginButton({ loading, onError, btnId }: { loading: boolean, onError: (
           address_country: data.user.address_country ?? null,
           created_at: data.user.created_at ?? null,
           updated_at: data.user.updated_at ?? null,
-        });
+        }, data.sessionId, data.expiresAt);
         toast({
           title: "Login Successful",
           description: "Discover exclusive offers now!",
@@ -292,7 +292,7 @@ export default function AuthPage() {
               </CardContent>
               <CardFooter className="px-4 md:px-6 pb-4 md:pb-6">
                 <div className="space-y-3 w-full">
-                  <LoginButton loading={false} onError={() => {}} btnId="loginBtn" />
+                  <LoginButton loading={false} onError={() => { }} btnId="loginBtn" />
 
                   <div className="relative">
                     <div className="absolute inset-0 flex items-center">

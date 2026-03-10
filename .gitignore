@@ -29,3 +29,14 @@ next-env.d.ts
 
 # prisma (DO NOT ignore migrations!)
 # /prisma/migrations  ← NEVER ignore this!
+
+# Java Rule-Based Engine
+rule-based/target/
+rule-based/output/
+rule-based/dependency-reduced-pom.xml
+rule-based/.mvn/
+
+# Python ML artifacts
+ml/.venv/
+ml/artifacts/
+ml/__pycache__/

@@ -6,7 +6,7 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
-import { LayoutDashboard, Package, User, Edit, MapPin, Heart, LogOut, Menu } from "lucide-react"
+import { LayoutDashboard, Package, User, Edit, MapPin, Heart, LogOut, Menu, Shield } from "lucide-react"
 import { useAuthStore } from "@/store/auth-store"
 import { useToast } from "@/hooks/use-toast"
 
@@ -41,6 +41,11 @@ const sidebarItems = [
     href: "/profile/wishlist",
     icon: Heart,
   },
+  {
+    title: "Security",
+    href: "/profile/security",
+    icon: Shield,
+  },
 ]
 
 export default function ProfileLayout({
@@ -73,11 +78,10 @@ export default function ProfileLayout({
               <li key={item.href}>
                 <Link
                   href={item.href}
-                  className={`flex items-center px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    isActive
-                      ? "bg-blue-100 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400"
-                      : "text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
-                  }`}
+                  className={`flex items-center px-3 py-2 rounded-lg text-sm font-medium transition-colors ${isActive
+                    ? "bg-blue-100 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400"
+                    : "text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
+                    }`}
                   onClick={() => setIsMobileMenuOpen(false)}
                 >
                   <Icon className="h-4 w-4 mr-3" />
@@ -93,8 +97,8 @@ export default function ProfileLayout({
         <Button
           variant="ghost"
           className="w-full justify-start text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20"
-          onClick={() => {
-            logout();
+          onClick={async () => {
+            await logout();
             toast({
               title: "Logged out",
               description: "You have been signed out successfully.",

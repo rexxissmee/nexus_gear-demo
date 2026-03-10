@@ -1,0 +1,24 @@
+# ML Pipeline – Session Hijacking Detection (LSTM Next-Event Prediction)
+# Install: pip install -r requirements.txt
+
+# Core ML
+torch>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+pandas>=2.2.0
+
+# Data storage
+pyarrow>=15.0.0      # Parquet support
+
+# Database
+psycopg2-binary>=2.9.9   # PostgreSQL driver
+
+# Config
+pyyaml>=6.0.1
+python-dotenv>=1.0.1
+
+# Visualization (evaluation)
+matplotlib>=3.8.0
+
+# Export
+scipy>=1.12.0        # ROC-AUC, PR-AUC

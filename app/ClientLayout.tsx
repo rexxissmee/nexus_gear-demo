@@ -5,11 +5,103 @@ import "./globals.css"
 import Navbar from "@/components/navbar"
 import Footer from "@/components/footer"
 import { ThemeProvider } from "@/components/theme-provider"
-import { useEffect, useState } from "react"
-import { usePathname } from "next/navigation"
+import { useEffect, useRef, useState } from "react"
+import { usePathname, useRouter } from "next/navigation"
 import { ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Toaster } from "@/components/ui/toaster"
+import { useAuthStore } from "@/store/auth-store"
+import { useSecurityMonitor, type ScoreResult } from "@/hooks/use-security-monitor"
+import { StepUpDialog } from "@/components/security/step-up-dialog"
+import { useToast } from "@/hooks/use-toast"
+
+// ── Session Guard ──────────────────────────────────────────────────────────────
+// Polls /api/auth/check every 5s to detect remote session revocation.
+// If the server returns 401 (session revoked/expired), force logout immediately.
+const SESSION_CHECK_INTERVAL_MS = 5_000
+
+function SessionGuard() {
+  const isLoggedIn = useAuthStore(s => s.isLoggedIn)
+  const logout = useAuthStore(s => s.logout)
+  const router = useRouter()
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const checkSession = async () => {
+    try {
+      const res = await fetch('/api/auth/check', { method: 'GET', cache: 'no-store' })
+      if (res.status === 401) {
+        // Session was revoked remotely — clear state and redirect
+        await logout()
+        router.replace('/auth?reason=session_revoked')
+      }
+    } catch {
+      // Network error – don't force logout, let the user retry
+    }
+  }
+
+  useEffect(() => {
+    if (!isLoggedIn) return
+
+    // Check immediately on login, then every 5s
+    checkSession()
+    intervalRef.current = setInterval(checkSession, SESSION_CHECK_INTERVAL_MS)
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn])
+
+  return null
+}
+
+// ── Security Monitor ───────────────────────────────────────────────────────────
+// Detects anomalous client behavior (idle, burst, navigation) and scores via LSTM.
+// Reacts to policy decisions: WARN (toast), STEP_UP (dialog), REVOKE (force logout).
+function SecurityMonitor() {
+  const isLoggedIn = useAuthStore(s => s.isLoggedIn)
+  const logout = useAuthStore(s => s.logout)
+  const stepUpRequired = useAuthStore(s => s.stepUpRequired)
+  const stepUpReason = useAuthStore(s => s.stepUpReason)
+  const setStepUp = useAuthStore(s => s.setStepUp)
+  const router = useRouter()
+  const { toast } = useToast()
+
+  const handleDecision = (result: ScoreResult) => {
+    if (result.decision === 'WARN') {
+      toast({
+        title: 'Unusual activity detected',
+        description: result.reason ?? 'Your session behaviour looks unusual.',
+        variant: 'destructive',
+        duration: 6000,
+      })
+    } else if (result.decision === 'STEP_UP') {
+      setStepUp(true, result.reason)
+    } else if (result.decision === 'REVOKE') {
+      logout().then(() => router.replace('/auth?reason=session_revoked'))
+    }
+  }
+
+  useSecurityMonitor({ enabled: isLoggedIn, onDecision: handleDecision })
+
+  const handleStepUpSuccess = () => setStepUp(false)
+
+  const handleStepUpRevoked = async () => {
+    setStepUp(false)
+    await logout()
+    router.replace('/auth?reason=step_up_failed')
+  }
+
+  return (
+    <StepUpDialog
+      open={stepUpRequired && isLoggedIn}
+      reason={stepUpReason}
+      onSuccess={handleStepUpSuccess}
+      onRevoked={handleStepUpRevoked}
+    />
+  )
+}
+
 
 function ScrollToTop() {
   const pathname = usePathname()
@@ -76,6 +168,8 @@ export default function ClientLayout({
           disableTransitionOnChange={false}
           storageKey="nexusgear-theme"
         >
+          <SessionGuard />
+          <SecurityMonitor />
           {!isAdmin && <ScrollToTop />}
           {!isAdmin && <Navbar />}
           {children}

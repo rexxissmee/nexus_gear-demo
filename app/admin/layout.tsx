@@ -20,7 +20,7 @@ import {
   SheetContent,
   SheetTrigger,
 } from '@/components/ui/sheet'
-import { LayoutDashboard, Package, ShoppingCart, Users, Search, Bell, Menu, LogOut, Settings, User, Tags, UserRound, ArrowLeftFromLine } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, Users, Search, Bell, Menu, LogOut, Settings, User, Tags, UserRound, ArrowLeftFromLine, Shield } from 'lucide-react'
 import { useAuthStore } from '@/store/auth-store'
 
 const navigationItems = [
@@ -48,6 +48,11 @@ const navigationItems = [
     name: 'Users',
     href: '/admin/users',
     icon: Users,
+  },
+  {
+    name: 'Security',
+    href: '/admin/security',
+    icon: Shield,
   },
 ]
 
@@ -105,16 +110,20 @@ export default function AdminLayout({
           )
         })}
       </nav>
-      <div className="px-3 py-4">
-        <Link
-          href="/"
-          className={`group flex items-center rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-200 text-gray-700 hover:bg-blue-100 hover:text-blue-700 ${sidebarCollapsed ? 'justify-center' : ''}`}
-          title="Back to homepage"
-        >
-          <ArrowLeftFromLine className={`h-5 w-5 ${sidebarCollapsed ? '' : 'mr-3'}`} />
-          {!sidebarCollapsed && 'Back to homepage'}
-        </Link>
-      </div>
+      {!mobile && (
+        <div className="px-3 py-4">
+          <button
+            onClick={() => setSidebarCollapsed(v => !v)}
+            className={`group flex items-center w-full rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-200 text-gray-700 hover:bg-blue-100 hover:text-blue-700 ${sidebarCollapsed ? 'justify-center' : ''}`}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <ArrowLeftFromLine
+              className={`h-5 w-5 transition-transform duration-300 ${sidebarCollapsed ? 'rotate-180' : ''} ${sidebarCollapsed ? '' : 'mr-3'}`}
+            />
+            {!sidebarCollapsed && 'Collapse sidebar'}
+          </button>
+        </div>
+      )}
     </div>
   )
 
@@ -127,7 +136,7 @@ export default function AdminLayout({
 
       {/* Mobile Sidebar */}
       <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
-        <SheetContent side="left" className="p-0 w-56">
+        <SheetContent side="left" className="p-0 w-56" hideCloseButton>
           <Sidebar mobile />
         </SheetContent>
       </Sheet>
@@ -142,16 +151,6 @@ export default function AdminLayout({
               size="icon"
               className="lg:hidden"
               onClick={() => setSidebarOpen(v => !v)}
-            >
-              <Menu className="h-5 w-5" />
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="icon"
-              className="hidden lg:flex"
-              onClick={() => setSidebarCollapsed(v => !v)}
-              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             >
               <Menu className="h-5 w-5" />
             </Button>
