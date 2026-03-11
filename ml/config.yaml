@@ -21,6 +21,7 @@ feature_builder:
 model:
   vocab_size: 21           # |V| = len(vocab.json)
   embedding_dim: 64
+  extra_dim: 6             # 1 (log_dt) + 5 (flags: ip/ua/device/geo/cookie)
   lstm_hidden: 256
   lstm_layers: 2
   dropout: 0.2

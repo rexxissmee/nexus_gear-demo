@@ -145,13 +145,21 @@ export async function getSecurityDashboardStats() {
         return acc
     }, {} as Record<string, number>)
 
+    const warns       = auditCounts['WARN']    ?? 0
+    const stepUps     = auditCounts['STEP_UP'] ?? 0
+    const revokes     = auditCounts['REVOKE']  ?? 0
+    // FPR estimate = warns on non-policy-revoked sessions / total such sessions
+    const normalSessions = totalSessions - revokedSessions
+    const estimatedFpr   = normalSessions > 0 ? warns / normalSessions : 0
+
     return {
         totalSessions,
         activeSessions: totalSessions - revokedSessions,
         revokedSessions,
-        warns: auditCounts['WARN'] ?? 0,
-        stepUps: auditCounts['STEP_UP'] ?? 0,
-        revokes: auditCounts['REVOKE'] ?? 0,
+        warns,
+        stepUps,
+        revokes,
+        estimatedFpr: parseFloat(estimatedFpr.toFixed(4)),
         recentEvents,
     }
 }

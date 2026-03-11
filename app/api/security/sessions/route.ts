@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getActiveSessions, revokeSession } from '@/lib/session'
 import { logEvent } from '@/lib/event-logger'
+import { prisma } from '@/lib/prisma'
 
 /**
  * GET /api/security/sessions
@@ -51,6 +52,18 @@ export async function DELETE(request: NextRequest) {
 
         if (!sessionId) {
             return NextResponse.json({ error: 'sessionId required' }, { status: 400 })
+        }
+
+        // Ownership check: session phải thuộc về user đang request
+        const session = await prisma.session.findUnique({
+            where: { sessionId },
+            select: { userId: true, revokedAt: true },
+        })
+        if (!session || session.userId !== userId) {
+            return NextResponse.json({ error: 'Session not found' }, { status: 404 })
+        }
+        if (session.revokedAt) {
+            return NextResponse.json({ error: 'Session already revoked' }, { status: 409 })
         }
 
         await revokeSession(sessionId, 'user_manual_revoke')
