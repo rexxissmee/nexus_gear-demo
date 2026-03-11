@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { Prisma } from '@prisma/client'
+import { logEvent } from '@/lib/event-logger'
 
 // GET /api/cart?user_id=1 - Get cart items for user
 export async function GET(request: NextRequest) {
@@ -39,6 +40,13 @@ export async function GET(request: NextRequest) {
         category: item.product.category?.name || 'Other',
         quantity: item.quantity,
       }))
+
+    // Log normal API activity
+    const sessionId = request.cookies.get('session_id')?.value
+    if (sessionId) {
+      await logEvent(sessionId, 'API_CALL_NORMAL',
+        {}, { endpoint_group: 'cart', status_group: '2xx' }, {})
+    }
 
     return NextResponse.json({
       success: true,
@@ -95,6 +103,11 @@ export async function POST(request: NextRequest) {
         })
       }
 
+      const addSessionId = request.cookies.get('session_id')?.value
+      if (addSessionId) {
+        await logEvent(addSessionId, 'API_CALL_NORMAL',
+          {}, { endpoint_group: 'cart', status_group: '2xx' }, {})
+      }
       return NextResponse.json({
         success: true,
         message: 'Product added to cart successfully.',
@@ -119,6 +132,11 @@ export async function POST(request: NextRequest) {
         data: { quantity },
       })
 
+      const updateSessionId = request.cookies.get('session_id')?.value
+      if (updateSessionId) {
+        await logEvent(updateSessionId, 'API_CALL_NORMAL',
+          {}, { endpoint_group: 'cart', status_group: '2xx' }, {})
+      }
       return NextResponse.json({
         success: true,
         message: 'Cart updated successfully.',
@@ -137,6 +155,11 @@ export async function POST(request: NextRequest) {
         where: { id: cartItemId, userId }, // Ensure it belongs to the user
       })
 
+      const removeSessionId = request.cookies.get('session_id')?.value
+      if (removeSessionId) {
+        await logEvent(removeSessionId, 'API_CALL_NORMAL',
+          {}, { endpoint_group: 'cart', status_group: '2xx' }, {})
+      }
       return NextResponse.json({
         success: true,
         message: 'Item removed from cart successfully.',
@@ -149,6 +172,11 @@ export async function POST(request: NextRequest) {
         where: { userId },
       })
 
+      const clearSessionId = request.cookies.get('session_id')?.value
+      if (clearSessionId) {
+        await logEvent(clearSessionId, 'API_CALL_NORMAL',
+          {}, { endpoint_group: 'cart', status_group: '2xx' }, {})
+      }
       return NextResponse.json({
         success: true,
         message: 'Cart cleared successfully.',

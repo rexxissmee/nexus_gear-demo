@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { logEvent } from '@/lib/event-logger'
+import { verifyToken } from '@/lib/jwt'
 
 export async function POST(request: NextRequest) {
   try {
@@ -82,6 +84,16 @@ export async function POST(request: NextRequest) {
       address_country: updatedUser.addressCountry,
       created_at: updatedUser.createdAt,
       updated_at: updatedUser.updatedAt,
+    }
+
+    // Log sensitive action (profile update)
+    const token = request.cookies.get('session_token')?.value
+    if (token) {
+      const payload = await verifyToken(token)
+      if (payload) {
+        await logEvent(String(payload.sessionId), 'API_CALL_SENSITIVE',
+          {}, { endpoint_group: 'profile', status_group: '2xx' }, {})
+      }
     }
 
     return NextResponse.json({

@@ -16,6 +16,12 @@ export async function GET(request: NextRequest) {
         const sessions = await getActiveSessions(userId)
         const currentSessionId = request.headers.get('x-session-id') || ''
 
+        // Log sensitive: viewing active sessions
+        if (currentSessionId) {
+            await logEvent(currentSessionId, 'API_CALL_SENSITIVE',
+                {}, { endpoint_group: 'security', status_group: '2xx' }, {})
+        }
+
         return NextResponse.json({
             success: true,
             sessions: sessions.map(s => ({

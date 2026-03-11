@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { verifyRegistrationResponse } from '@simplewebauthn/server'
 import { prisma } from '@/lib/prisma'
 import { verifyToken } from '@/lib/jwt'
+import { logEvent } from '@/lib/event-logger'
 
 const RP_ID = process.env.NEXT_PUBLIC_RP_ID || 'localhost'
 const ORIGIN = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
@@ -67,6 +68,10 @@ export async function POST(request: NextRequest) {
                 name: passkeyName,
             },
         })
+
+        // Log sensitive: new passkey registered
+        await logEvent(String(payload.sessionId), 'API_CALL_SENSITIVE',
+            {}, { endpoint_group: 'auth', status_group: '2xx' }, { method: 'passkey_register' })
 
         // Xoá challenge cookie
         const response = NextResponse.json({ verified: true })
