@@ -35,6 +35,7 @@ model User {
   reviews        Review[]
   wishlist       Wishlist[]
   sessions       Session[]
+  passkeys       Passkey[]
 
   @@map("users")
 }
@@ -242,4 +243,29 @@ model AuditLog {
   @@index([sessionId])
   @@index([ts])
   @@map("audit_logs")
+}
+
+// ==================== PASSKEY / WEBAUTHN ====================
+
+// Passkey model – WebAuthn credentials (1 user có thể có nhiều passkeys)
+model Passkey {
+  id           Int      @id @default(autoincrement())
+  userId       Int      @map("user_id")
+  // credentialId: raw bytes từ WebAuthn authenticator (unique)
+  credentialId Bytes    @unique @map("credential_id")
+  // publicKey: COSE-encoded public key (bytes)
+  publicKey    Bytes    @map("public_key")
+  // counter: số lần ký (dùng để phát hiện replay attacks)
+  counter      BigInt   @default(0)
+  // transports: danh sách transport hints (json array: "ble", "internal", "nfc", "usb")
+  transports   String?  @db.VarChar(255)
+  // Tên thân thiện do user đặt (tuỳ chọn)
+  name         String?  @db.VarChar(100)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("passkeys")
 }

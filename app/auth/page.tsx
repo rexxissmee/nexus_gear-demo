@@ -1,6 +1,7 @@
 "use client"
 
 import React from "react";
+import { startAuthentication } from "@simplewebauthn/browser";
 import { useAuthStore } from "@/store/auth-store";
 import { useToast } from "@/hooks/use-toast"
 import { useRouter } from "next/navigation"
@@ -109,15 +110,62 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { Eye, EyeOff } from "lucide-react"
+import { Eye, EyeOff, KeyRound, Loader2 } from "lucide-react"
 
 export default function AuthPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [registerLoading, setRegisterLoading] = useState(false)
   const [registerError, setRegisterError] = useState<string | null>(null)
   const [registerSuccess, setRegisterSuccess] = useState<string | null>(null)
+  const [passkeyLoading, setPasskeyLoading] = useState(false)
+  const { toast } = useToast()
+  const router = useRouter()
+  const login = useAuthStore((state) => state.login)
 
-  // RegisterButton component
+  const handlePasskeyLogin = async () => {
+    setPasskeyLoading(true)
+    try {
+      // 1. Get options (email-less → discoverable credential)
+      const email = (document.getElementById('loginEmail') as HTMLInputElement)?.value.trim()
+      const url = email
+        ? `/api/auth/passkey/login/options?email=${encodeURIComponent(email)}`
+        : '/api/auth/passkey/login/options'
+      const optRes = await fetch(url)
+      if (!optRes.ok) throw new Error('Could not get passkey options')
+      const options = await optRes.json()
+
+      // 2. Browser dialog
+      const credential = await startAuthentication({ optionsJSON: options })
+
+      // 3. Verify
+      const verifyRes = await fetch('/api/auth/passkey/login/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(credential),
+      })
+      const data = await verifyRes.json()
+      if (!verifyRes.ok) throw new Error(data.error || 'Passkey login failed')
+
+      toast({ title: 'Passkey Login Successful', description: 'Welcome back!',
+        className: 'bg-green-600 text-white border-none shadow-xl rounded-lg font-semibold text-base px-6 py-4' })
+
+      // Dùng user data trực tiếp từ login/verify response (không cần gọi /api/auth/check thêm)
+      localStorage.setItem('user', JSON.stringify(data.user))
+      login(data.user, data.sessionId, data.expiresAt)
+      setTimeout(() => {
+        router.push(data.user?.role === 'admin' ? '/admin' : '/')
+      }, 800)
+    } catch (err: unknown) {
+      const name = err instanceof Error ? err.name : ''
+      if (name !== 'NotAllowedError') {
+        toast({ title: 'Passkey Error', description: err instanceof Error ? err.message : 'Failed',
+          variant: 'destructive', className: 'bg-red-600 text-white border-none shadow-xl rounded-lg font-semibold text-base px-6 py-4' })
+      }
+    } finally {
+      setPasskeyLoading(false)
+    }
+  }
+
   function RegisterButton({ loading, onError, onSuccess, btnId }: { loading: boolean, onError: (err: any) => void, onSuccess: (msg: string) => void, btnId?: string }) {
     const [btnLoading, setBtnLoading] = useState(false);
     const { toast } = useToast();
@@ -250,7 +298,7 @@ export default function AuthPage() {
                       id="loginPassword"
                       type={showPassword ? "text" : "password"}
                       placeholder="••••••••"
-                      className="h-9 md:h-10 pr-10"
+                      className="h-9 md:h-10 pr-10 [&::-ms-reveal]:hidden"
                       tabIndex={2}
                       onKeyDown={e => {
                         if (e.key === 'Enter') {
@@ -328,6 +376,21 @@ export default function AuthPage() {
                     </svg>
                     Continue with Google
                   </Button>
+
+                  {/* Passkey login */}
+                  <Button
+                    variant="outline"
+                    className="w-full h-9 md:h-10 bg-transparent text-sm md:text-base border-blue-500/40 hover:bg-blue-950/30 text-blue-400 hover:text-blue-300"
+                    type="button"
+                    id="passkeyLoginBtn"
+                    onClick={handlePasskeyLogin}
+                    disabled={passkeyLoading}
+                  >
+                    {passkeyLoading
+                      ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      : <KeyRound className="mr-2 h-3.5 w-3.5 md:h-4 md:w-4 text-blue-400" />}
+                    {passkeyLoading ? 'Waiting for passkey…' : 'Sign in with Passkey'}
+                  </Button>
                 </div>
               </CardFooter>
             </Card>
@@ -403,7 +466,7 @@ export default function AuthPage() {
                       id="newPassword"
                       type={showPassword ? "text" : "password"}
                       placeholder="••••••••"
-                      className="h-9 md:h-10 pr-10"
+                      className="h-9 md:h-10 pr-10 [&::-ms-reveal]:hidden"
                       tabIndex={7}
                       onKeyDown={e => {
                         if (e.key === 'Enter') {
@@ -431,7 +494,7 @@ export default function AuthPage() {
                   <Label htmlFor="confirmPassword" className="text-sm">
                     Confirm Password
                   </Label>
-                  <Input id="confirmPassword" type="password" placeholder="••••••••" className="h-9 md:h-10" tabIndex={8}
+                  <Input id="confirmPassword" type="password" placeholder="••••••••" className="h-9 md:h-10 [&::-ms-reveal]:hidden" tabIndex={8}
                     onKeyDown={e => {
                       if (e.key === 'Enter') {
                         document.getElementById('registerBtn')?.click();

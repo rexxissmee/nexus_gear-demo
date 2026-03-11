@@ -42,6 +42,7 @@ export interface EventMetrics {
 export interface EventConfig {
     rotation_enabled?: boolean
     passkey_enabled?: boolean
+    method?: string
 }
 
 // Track last event per session for delta_t calculation
