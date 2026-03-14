@@ -224,12 +224,12 @@ export function useSecurityMonitor(opts: {
     // ── Track page navigation ──────────────────────────────────────────────────
     useEffect(() => {
         if (!enabled) return
-        pushEvent('API_CALL_NORMAL')
+        logFlagEvent('API_CALL_NORMAL', { navigation: 1 })
         resetIdle()
         // Re-check device/geo on every navigation (lazy SPA detection)
         checkDeviceChange()
         checkGeoChange()
-    }, [pathname, enabled, pushEvent, resetIdle, checkDeviceChange, checkGeoChange])
+    }, [pathname, enabled, logFlagEvent, resetIdle, checkDeviceChange, checkGeoChange])
 
     return { pushEvent, scoreWindow }
 }

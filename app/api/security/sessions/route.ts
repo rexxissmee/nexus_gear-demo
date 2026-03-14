@@ -67,7 +67,6 @@ export async function DELETE(request: NextRequest) {
         }
 
         await revokeSession(sessionId, 'user_manual_revoke')
-        await logEvent(sessionId, 'TOKEN_REVOKE', {}, { endpoint_group: 'security' }, {})
 
         return NextResponse.json({ success: true, message: 'Session revoked.' })
     } catch (error) {
