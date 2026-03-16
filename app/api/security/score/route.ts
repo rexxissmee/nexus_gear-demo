@@ -38,30 +38,33 @@ export async function POST(request: NextRequest) {
             req_burst: events.some((e: Record<string, unknown>) => e.event_type === 'REQUEST_BURST') ? 1 : 0,
         }
 
-        let windowScore: number
+        let inferResult: any = { risk_score: 0 }
         let scoringMethod: string
 
         if (use_rule_based || events.length === 0) {
-            windowScore = ruleBasedScore(flagsSummary)
+            inferResult.risk_score = ruleBasedScore(flagsSummary)
             scoringMethod = 'rule_based'
         } else {
             try {
-                windowScore = await callLSTMInfer(events)
+                inferResult = await callLSTMInfer(events)
                 scoringMethod = 'lstm'
             } catch (err) {
                 // Fallback to proxy if Python not available
                 console.warn('[Score] LSTM infer failed, falling back to proxy:', err)
-                windowScore = computeProxyScore(events)
+                inferResult.risk_score = computeProxyScore(events)
                 scoringMethod = 'proxy_fallback'
             }
         }
 
         // Evaluate policy (EMA + consecutive windows)
-        const policyResult = await evaluatePolicy(sessionId, windowScore, DEFAULT_POLICY)
+        const policyResult = await evaluatePolicy(sessionId, inferResult.risk_score, DEFAULT_POLICY)
 
         return NextResponse.json({
             success: true,
             anomaly_score: policyResult.anomalyScore,
+            risk_score: inferResult.risk_score,
+            class_probs: inferResult.class_probs ?? null,
+            predicted_label: inferResult.predicted_label ?? null,
             risk_ema: policyResult.riskEma,
             decision: policyResult.decision,
             reason: policyResult.reason ?? null,
@@ -79,7 +82,7 @@ export async function POST(request: NextRequest) {
  * Sends event window as JSON on stdin, reads float score from stdout.
  * Timeout: 8 seconds (model loads fast on CPU for 30-event window).
  */
-function callLSTMInfer(events: Array<{ event_type: string; delta_t_ms?: number }>): Promise<number> {
+function callLSTMInfer(events: Array<{ event_type: string; delta_t_ms?: number }>): Promise<any> {
     return new Promise((resolve, reject) => {
         const mlDir = path.join(process.cwd(), 'ml')
         const inferPath = path.join(mlDir, 'infer.py')
@@ -105,12 +108,18 @@ function callLSTMInfer(events: Array<{ event_type: string; delta_t_ms?: number }
                 reject(new Error(`infer.py exited ${code}: ${stderr.slice(0, 200)}`))
                 return
             }
-            const score = parseFloat(stdout.trim())
-            if (isNaN(score)) {
-                reject(new Error(`infer.py returned non-numeric: '${stdout.trim()}'`))
-                return
+            try {
+                const outStruct = JSON.parse(stdout.trim())
+                resolve(outStruct)
+            } catch (err) {
+                // fallback to bare float if script still returns number
+                const score = parseFloat(stdout.trim());
+                if (!isNaN(score)) {
+                    resolve({ risk_score: score })
+                } else {
+                    reject(new Error(`infer.py returned invalid output: '${stdout.trim()}'`))
+                }
             }
-            resolve(score)
         })
 
         // Write payload to stdin

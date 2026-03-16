@@ -36,7 +36,7 @@ training:
   patience: 5              # early stopping patience
   val_split: 0.15
   test_split: 0.10
-  lambda_dt: 0.1           # weight for delta_t loss (if use_dt_head)
+  pos_weight: 10.0         # weight for positive class imbalance
 
 # Scoring (M4)
 scoring:

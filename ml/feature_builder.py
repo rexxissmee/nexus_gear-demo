@@ -80,11 +80,11 @@ def build_features(df: pd.DataFrame, vocab: dict, cfg: dict) -> pd.DataFrame:
 
 # ── Windowing ─────────────────────────────────────────────────────────────────
 
-def create_windows(df: pd.DataFrame, cfg: dict) -> dict:
+def create_windows(df: pd.DataFrame, cfg: dict, attack_markers: dict) -> dict:
     """
     Sliding window over each session.
-    X: event_id sequence [t=1..L-1]
-    y_event: next event_id [t=2..L]
+    X: sequence features [t=1..L]
+    y: binary label (0=NORMAL, 1=ATTACK) for the window
     """
     L = cfg['feature_builder']['window_length']
     stride = cfg['feature_builder']['stride']
@@ -94,7 +94,7 @@ def create_windows(df: pd.DataFrame, cfg: dict) -> dict:
                  'flag_geo_change', 'flag_cookie_missing']
     
     X_events, X_dt, X_flags = [], [], []
-    y_events = []
+    y_labels = []
     session_ids_out = []
     
     for session_id, grp in df.groupby('session_id'):
@@ -103,48 +103,71 @@ def create_windows(df: pd.DataFrame, cfg: dict) -> dict:
         
         if n < min_len:
             continue
-        
+            
         event_ids = grp['event_id'].values
         log_dts = grp['log_dt'].values
         flags = grp[[c for c in flag_cols if c in grp.columns]].values if any(c in grp.columns for c in flag_cols) else np.zeros((n, len(flag_cols)))
         
+        # Check if session has attack
+        attack_ts = None
+        if attack_markers and str(session_id) in attack_markers:
+            attack_ts = pd.to_datetime(attack_markers[str(session_id)], utc=True)
+            
         # Sliding windows
         for start in range(0, n - L + 1, stride):
             end = start + L
-            X_events.append(event_ids[start:end-1])   # input: t=1..L-1
-            X_dt.append(log_dts[start:end-1])
-            X_flags.append(flags[start:end-1])
-            y_events.append(event_ids[start+1:end])   # target: t=2..L (next event)
+            X_events.append(event_ids[start:end])
+            X_dt.append(log_dts[start:end])
+            X_flags.append(flags[start:end])
+            
+            # Labeling logic
+            label = 0
+            if attack_ts is not None:
+                # Window ends at index `end-1`
+                last_event_ts = pd.to_datetime(grp.iloc[end-1]['ts'], utc=True)
+                if last_event_ts >= attack_ts:
+                    label = 1
+            y_labels.append(label)
             session_ids_out.append(session_id)
-    
-    print(f"[FeatureBuilder] Created {len(X_events)} windows from {df['session_id'].nunique()} sessions")
+            
+    print(f"[FeatureBuilder] Created {len(X_events)} windows (Normal: {y_labels.count(0)}, Attack: {y_labels.count(1)}) from {df['session_id'].nunique()} sessions")
     
     return {
         'X_events':    np.array(X_events, dtype=np.int32),
         'X_dt':        np.array(X_dt, dtype=np.float32),
         'X_flags':     np.array(X_flags, dtype=np.float32),
-        'y_events':    np.array(y_events, dtype=np.int32),
+        'y':           np.array(y_labels, dtype=np.float32),
         'session_ids': np.array(session_ids_out),
     }
 
 # ── Train/Val/Test Split ──────────────────────────────────────────────────────
 
 def split_dataset(data: dict, cfg: dict, seed: int = 42) -> tuple[dict, dict, dict]:
-    n = len(data['X_events'])
-    idx = list(range(n))
-    random.seed(seed)
-    random.shuffle(idx)
+    """Split data grouped by session_id to avoid leakage."""
+    session_ids = np.unique(data['session_ids'])
+    np.random.seed(seed)
+    np.random.shuffle(session_ids)
     
-    val_size = int(n * cfg['training']['val_split'])
-    test_size = int(n * cfg['training']['test_split'])
+    n_sessions = len(session_ids)
+    val_size = int(n_sessions * cfg['training']['val_split'])
+    test_size = int(n_sessions * cfg['training']['test_split'])
     
-    test_idx  = idx[:test_size]
-    val_idx   = idx[test_size:test_size + val_size]
-    train_idx = idx[test_size + val_size:]
+    test_sessions  = set(session_ids[:test_size])
+    val_sessions   = set(session_ids[test_size:test_size + val_size])
+    train_sessions = set(session_ids[test_size + val_size:])
     
+    train_idx, val_idx, test_idx = [], [], []
+    for i, s_id in enumerate(data['session_ids']):
+        if s_id in test_sessions:
+            test_idx.append(i)
+        elif s_id in val_sessions:
+            val_idx.append(i)
+        else:
+            train_idx.append(i)
+            
     def subset(idx_list):
         return {k: v[idx_list] for k, v in data.items()}
-    
+        
     return subset(train_idx), subset(val_idx), subset(test_idx)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -164,27 +187,63 @@ def main():
     if not db_url:
         print("ERROR: DATABASE_URL not set. Add to .env or config.yaml")
         sys.exit(1)
-    
+        
     with open('vocab.json') as f:
         vocab = json.load(f)
-    
-    # Load and process events
-    df = fetch_events(db_url, args.split)
-    df = build_features(df, vocab, cfg)
-    
-    # Create windows
-    data = create_windows(df, cfg)
-    
-    # Split
-    train, val, test = split_dataset(data, cfg, seed=cfg.get('seed', 42))
-    
-    # Save
+        
     out_dir = Path(cfg['artifacts']['dataset_dir'])
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    for name, split in [('train', train), ('val', val), ('test', test)]:
-        np.savez(out_dir / f'dataset_{name}.npz', **split)
-        print(f"[FeatureBuilder] Saved {len(split['X_events'])} samples → {out_dir}/dataset_{name}.npz")
+    # Load labels
+    attack_markers = {}
+    marker_file = out_dir / "attack_markers.json"
+    if marker_file.exists():
+        with open(marker_file) as f:
+            attack_markers = json.load(f)
+    else:
+        print(f"[FeatureBuilder] WARNING: {marker_file} not found. All labels will be 0.")
+    
+    # Load and process events
+    try:
+        df = fetch_events(db_url, args.split)
+        if df.empty:
+            print("[FeatureBuilder] No events found.")
+            sys.exit(0)
+    except Exception as e:
+        print(f"Error fetching: {e}")
+        sys.exit(1)
+        
+    df = build_features(df, vocab, cfg)
+    
+    # Create windows
+    data = create_windows(df, cfg, attack_markers=attack_markers)
+    if len(data['X_events']) == 0:
+        print("[FeatureBuilder] No windows extracted (sessions too short?).")
+        sys.exit(0)
+        
+    # Split
+    train, val, test = split_dataset(data, cfg, seed=cfg.get('seed', 42))
+    
+    # Save datasets
+    for name, split_data in [('train', train), ('val', val), ('test', test)]:
+        np.savez(out_dir / f'dataset_{name}.npz', **split_data)
+        print(f"[FeatureBuilder] Saved {len(split_data['X_events'])} samples → {out_dir}/dataset_{name}.npz")
+        
+    # Save separate split mappings
+    split_info = {
+        'train_sessions_count': len(np.unique(train['session_ids'])),
+        'val_sessions_count': len(np.unique(val['session_ids'])),
+        'test_sessions_count': len(np.unique(test['session_ids']))
+    }
+    with open(out_dir / 'split.json', 'w') as f:
+        json.dump(split_info, f, indent=2)
+        
+    # Save unique session ids that made it through
+    with open(out_dir / 'session_ids.json', 'w') as f:
+        json.dump(list(np.unique(data['session_ids'])), f, indent=2)
+        
+    # Extract 'y' array directly for label validations later if needed (often stored inside npz, but let's provide standalone optionally)
+    np.save(out_dir / 'y.npy', data['y'])
     
     # Save metadata
     meta = {
@@ -195,12 +254,13 @@ def main():
         'train_size': len(train['X_events']),
         'val_size': len(val['X_events']),
         'test_size': len(test['X_events']),
+        'num_attack_windows': int(data['y'].sum()),
         'created_at': datetime.utcnow().isoformat(),
         'seed': cfg.get('seed', 42),
     }
     with open(out_dir / 'dataset_meta.json', 'w') as f:
         json.dump(meta, f, indent=2)
-    
+        
     print(f"[FeatureBuilder] Done. Metadata saved to {out_dir}/dataset_meta.json")
 
 if __name__ == '__main__':

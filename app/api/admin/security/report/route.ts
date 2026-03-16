@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSecurityDashboardStats } from '@/lib/policy-engine'
 
+import fs from 'fs'
+import path from 'path'
+
 /**
  * GET /api/admin/security/report
  * Returns dashboard stats and optionally a CSV export.
@@ -30,7 +33,18 @@ export async function GET(request: NextRequest) {
             })
         }
 
-        return NextResponse.json({ success: true, ...stats })
+        // Try load ML metrics
+        let metrics = null
+        try {
+            const metricsPath = path.join(process.cwd(), 'ml', 'artifacts', 'reports', 'metrics_test.json')
+            if (fs.existsSync(metricsPath)) {
+                metrics = JSON.parse(fs.readFileSync(metricsPath, 'utf8'))
+            }
+        } catch (e) {
+            console.warn('[Report] Failed to read ML metrics', e)
+        }
+
+        return NextResponse.json({ success: true, ...stats, mlMetrics: metrics })
     } catch (error) {
         console.error('GET /api/admin/security/report error:', error)
         return NextResponse.json({ error: 'Failed to generate report' }, { status: 500 })

@@ -4,25 +4,35 @@ import { revokeSession } from '@/lib/session'
 
 // ==================== POLICY ENGINE CONFIG ====================
 export interface PolicyConfig {
-    warnThreshold: number       // T_warn = P99(R) – set after calibration
-    blockThreshold: number      // T_block = P99.9(R)
+    warnThreshold: number       // 0.50
+    stepUpThreshold: number     // 0.70
+    revokeThreshold: number     // 0.90
     emaAlpha: number            // β: EMA smoothing (e.g. 0.3)
-    warnConsecutive: number     // consecutive windows to trigger WARN (default 2)
-    revokeConsecutive: number   // consecutive windows to trigger REVOKE (default 3)
+    warnConsecutive: number     // consecutive windows to trigger WARN
+    stepUpConsecutive: number   // consecutive windows to trigger STEP_UP
+    revokeConsecutive: number   // consecutive windows to trigger REVOKE
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
-    warnThreshold: 0.4824,      // T_warn = P99(normal) – calibrated from LSTM (2026-02-27)
-    blockThreshold: 0.5295,     // T_block = P99.9(normal) – calibrated from LSTM (2026-02-27)
+    warnThreshold: 0.50,
+    stepUpThreshold: 0.70,
+    revokeThreshold: 0.90,
     emaAlpha: 0.3,
-    warnConsecutive: 2,
+    warnConsecutive: 1,
+    stepUpConsecutive: 2,
     revokeConsecutive: 3,
 }
 
-// In-memory EMA state (per session)
+// In-memory EMA and consecutive states (per session)
 // In production this would be in Redis
 const emaCache = new Map<string, number>()
-const consecutiveCache = new Map<string, number>()
+
+interface SessionViolationState {
+    warnCount: number;
+    stepUpCount: number;
+    revokeCount: number;
+}
+const consecutiveCache = new Map<string, SessionViolationState>()
 
 export type PolicyDecision = 'NONE' | 'WARN' | 'STEP_UP' | 'REVOKE'
 
@@ -34,7 +44,7 @@ export interface PolicyResult {
 }
 
 /**
- * Evaluate a window anomaly score through the policy engine.
+ * Evaluate a window sequence probability score through the policy engine.
  * Updates EMA state and applies consecutive-window thresholding.
  */
 export async function evaluatePolicy(
@@ -47,43 +57,49 @@ export async function evaluatePolicy(
     const riskEma = config.emaAlpha * prevEma + (1 - config.emaAlpha) * windowScore
     emaCache.set(sessionId, riskEma)
 
+    const state = consecutiveCache.get(sessionId) ?? { warnCount: 0, stepUpCount: 0, revokeCount: 0 }
+
+    if (riskEma >= config.revokeThreshold) {
+        state.revokeCount++
+        state.stepUpCount++
+        state.warnCount++
+    } else if (riskEma >= config.stepUpThreshold) {
+        state.revokeCount = 0
+        state.stepUpCount++
+        state.warnCount++
+    } else if (riskEma >= config.warnThreshold) {
+        state.revokeCount = 0
+        state.stepUpCount = 0
+        state.warnCount++
+    } else {
+        state.revokeCount = 0
+        state.stepUpCount = 0
+        state.warnCount = 0
+    }
+    
+    consecutiveCache.set(sessionId, state)
+
     let decision: PolicyDecision = 'NONE'
     let reason: string | undefined
 
-    if (riskEma > config.blockThreshold) {
-        const count = (consecutiveCache.get(sessionId) ?? 0) + 1
-        consecutiveCache.set(sessionId, count)
-
-        if (count >= config.revokeConsecutive) {
-            decision = 'REVOKE'
-            reason = `Risk EMA ${riskEma.toFixed(3)} > block threshold ${config.blockThreshold} for ${count} consecutive windows`
-            consecutiveCache.delete(sessionId)
-            emaCache.delete(sessionId)
-            // Auto-revoke
-            await revokeSession(sessionId, reason)
-        } else {
-            decision = 'STEP_UP'
-            reason = `Risk EMA ${riskEma.toFixed(3)} > block threshold, consecutive=${count}`
-        }
-    } else if (riskEma > config.warnThreshold) {
-        const count = (consecutiveCache.get(sessionId) ?? 0) + 1
-        consecutiveCache.set(sessionId, count)
-
-        if (count >= config.warnConsecutive) {
-            decision = count >= config.revokeConsecutive ? 'STEP_UP' : 'WARN'
-            reason = `Risk EMA ${riskEma.toFixed(3)} > warn threshold for ${count} consecutive windows`
-        }
-    } else {
-        // Below threshold: reset consecutive counter
-        consecutiveCache.set(sessionId, 0)
+    if (state.revokeCount >= config.revokeConsecutive) {
+        decision = 'REVOKE'
+        reason = `Risk EMA ${riskEma.toFixed(3)} >= ${config.revokeThreshold} for ${state.revokeCount} consecutive windows`
+        consecutiveCache.delete(sessionId)
+        emaCache.delete(sessionId)
+        // Auto-revoke
+        await revokeSession(sessionId, reason)
+    } else if (state.stepUpCount >= config.stepUpConsecutive) {
+        decision = 'STEP_UP'
+        reason = `Risk EMA ${riskEma.toFixed(3)} >= ${config.stepUpThreshold} for ${state.stepUpCount} consecutive windows`
+    } else if (state.warnCount >= config.warnConsecutive) {
+        decision = 'WARN'
+        reason = `Risk EMA ${riskEma.toFixed(3)} >= ${config.warnThreshold} for ${state.warnCount} consecutive windows`
     }
 
     // Log audit if action needed
     if (decision !== 'NONE') {
-        await logAuditAction(sessionId, decision === 'STEP_UP' ? 'STEP_UP' :
-            decision === 'REVOKE' ? 'REVOKE' : 'WARN',
-            reason, windowScore, riskEma
-        )
+        await logAuditAction(sessionId, decision, reason, windowScore, riskEma)
         if (decision === 'WARN') {
             await logEvent(sessionId, 'SESSION_ANOMALY_WARN', {}, { req_rate_10s: 0 }, {})
         }

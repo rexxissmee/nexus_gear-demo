@@ -1,7 +1,8 @@
 """
-M3 – LSTM Next-Event Prediction Training (Multimodal)
-Trains a self-supervised LSTM on normal session sequences.
+M3 – LSTM Supervised Sequence Classification
+Trains an LSTM on labeled session windows (0=NORMAL, 1=ATTACK).
 Input: event_id (embedded) + log(1+delta_t) + 5 binary flags
+Target: window binary label
 
 Usage:
   python train.py [--config config.yaml] [--data-dir artifacts/datasets]
@@ -21,6 +22,11 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import yaml
+try:
+    from sklearn.metrics import roc_auc_score, f1_score
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -44,24 +50,23 @@ NUM_FLAGS = len(FLAG_COLS)  # 5
 class SessionDataset(Dataset):
     def __init__(self, npz_path):
         data = np.load(npz_path)
-        self.X_ev    = torch.tensor(data['X_events'], dtype=torch.long)    # (N, L-1)
-        self.y_ev    = torch.tensor(data['y_events'], dtype=torch.long)    # (N, L-1)
+        self.X_ev = torch.tensor(data['X_events'], dtype=torch.long)    # (N, L)
+        self.y    = torch.tensor(data['y'], dtype=torch.float32)        # (N,)
 
-        # delta_t: shape (N, L-1) → add feature dim → (N, L-1, 1)
+        # delta_t: shape (N, L) → add feature dim → (N, L, 1)
         if 'X_dt' in data:
-            dt = data['X_dt'].astype(np.float32)           # (N, L-1)
-            self.X_dt = torch.tensor(dt).unsqueeze(-1)     # (N, L-1, 1)
+            dt = data['X_dt'].astype(np.float32)           # (N, L)
+            self.X_dt = torch.tensor(dt).unsqueeze(-1)     # (N, L, 1)
         else:
             self.X_dt = torch.zeros(len(self.X_ev), self.X_ev.shape[1], 1)
 
-        # flags: shape (N, L-1, 5) — may contain fewer than NUM_FLAGS columns
+        # flags: shape (N, L, 5)
         if 'X_flags' in data:
-            fl = data['X_flags'].astype(np.float32)        # (N, L-1, k)
-            # Pad to NUM_FLAGS if dataset has fewer flag columns
+            fl = data['X_flags'].astype(np.float32)        # (N, L, k)
             if fl.shape[-1] < NUM_FLAGS:
                 pad = np.zeros((*fl.shape[:-1], NUM_FLAGS - fl.shape[-1]), dtype=np.float32)
                 fl = np.concatenate([fl, pad], axis=-1)
-            self.X_flags = torch.tensor(fl[:, :, :NUM_FLAGS])  # (N, L-1, 5)
+            self.X_flags = torch.tensor(fl[:, :, :NUM_FLAGS])  # (N, L, 5)
         else:
             self.X_flags = torch.zeros(len(self.X_ev), self.X_ev.shape[1], NUM_FLAGS)
 
@@ -69,15 +74,15 @@ class SessionDataset(Dataset):
         return len(self.X_ev)
 
     def __getitem__(self, idx):
-        return self.X_ev[idx], self.X_dt[idx], self.X_flags[idx], self.y_ev[idx]
+        return self.X_ev[idx], self.X_dt[idx], self.X_flags[idx], self.y[idx]
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
-class LSTMNextEventModel(nn.Module):
+class LSTMSupervisedModel(nn.Module):
     """
-    Multimodal LSTM for next-event prediction.
+    Multimodal LSTM for sequence classification.
     Input per timestep: concat(embedding(event_id), log_dt, flags)
-    Target: next event_id at each step.
+    Target: Binary probability indicator
     """
 
     def __init__(self, vocab_size, embedding_dim, extra_dim,
@@ -93,7 +98,7 @@ class LSTMNextEventModel(nn.Module):
             batch_first=True,
         )
         self.dropout    = nn.Dropout(dropout)
-        self.classifier = nn.Linear(hidden_size, vocab_size)
+        self.classifier = nn.Linear(hidden_size, 1)
 
     def forward(self, x_ev, x_cont):
         """
@@ -103,43 +108,67 @@ class LSTMNextEventModel(nn.Module):
         emb = self.dropout(self.embedding(x_ev))     # (B, L, E)
         inp = torch.cat([emb, x_cont], dim=-1)       # (B, L, E+extra_dim)
         out, _ = self.lstm(inp)                      # (B, L, H)
-        logits = self.classifier(self.dropout(out))  # (B, L, V)
-        return logits
+        
+        # Take the last hidden state for sequence classification
+        last_hidden = out[:, -1, :]                  # (B, H)
+        
+        logits = self.classifier(self.dropout(last_hidden))  # (B, 1)
+        return logits.squeeze(-1)                    # (B,)
 
 # ── Training Loop ─────────────────────────────────────────────────────────────
 
 def train_epoch(model, loader, optimizer, criterion, device):
     model.train()
-    total_loss, total_tokens = 0.0, 0
+    total_loss, total_samples = 0.0, 0
+    all_preds, all_labels = [], []
+    
     for X_ev, X_dt, X_flags, y in loader:
         X_ev, X_dt, X_flags, y = (
             X_ev.to(device), X_dt.to(device), X_flags.to(device), y.to(device)
         )
         x_cont = torch.cat([X_dt, X_flags], dim=-1)   # (B, L, 6)
+        
         optimizer.zero_grad()
-        logits = model(X_ev, x_cont)                  # (B, L, V)
-        loss = criterion(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+        logits = model(X_ev, x_cont)                  # (B,)
+        loss = criterion(logits, y)
         loss.backward()
+        
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        total_loss   += loss.item() * y.numel()
-        total_tokens += y.numel()
-    return total_loss / total_tokens
+        
+        total_loss += loss.item() * y.size(0)
+        total_samples += y.size(0)
+        
+        all_preds.extend(torch.sigmoid(logits).detach().cpu().numpy())
+        all_labels.extend(y.cpu().numpy())
+        
+    avg_loss = total_loss / total_samples
+    auc = roc_auc_score(all_labels, all_preds) if HAS_SKLEARN and len(set(all_labels)) > 1 else 0.0
+    return avg_loss, auc
 
 @torch.no_grad()
 def eval_epoch(model, loader, criterion, device):
     model.eval()
-    total_loss, total_tokens = 0.0, 0
+    total_loss, total_samples = 0.0, 0
+    all_preds, all_labels = [], []
+    
     for X_ev, X_dt, X_flags, y in loader:
         X_ev, X_dt, X_flags, y = (
             X_ev.to(device), X_dt.to(device), X_flags.to(device), y.to(device)
         )
         x_cont = torch.cat([X_dt, X_flags], dim=-1)
         logits = model(X_ev, x_cont)
-        loss = criterion(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
-        total_loss   += loss.item() * y.numel()
-        total_tokens += y.numel()
-    return total_loss / total_tokens
+        loss = criterion(logits, y)
+        
+        total_loss += loss.item() * y.size(0)
+        total_samples += y.size(0)
+        
+        all_preds.extend(torch.sigmoid(logits).detach().cpu().numpy())
+        all_labels.extend(y.cpu().numpy())
+        
+    avg_loss = total_loss / total_samples
+    auc = roc_auc_score(all_labels, all_preds) if HAS_SKLEARN and len(set(all_labels)) > 1 else 0.0
+    return avg_loss, auc
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -160,8 +189,13 @@ def main():
     print(f"[Train] Using device: {device}")
 
     # Load datasets
-    train_ds = SessionDataset(data_dir / 'dataset_train.npz')
-    val_ds   = SessionDataset(data_dir / 'dataset_val.npz')
+    try:
+        train_ds = SessionDataset(data_dir / 'dataset_train.npz')
+        val_ds   = SessionDataset(data_dir / 'dataset_val.npz')
+    except Exception as e:
+        print(f"[Train] Error loading datasets: {e}")
+        print("Please ensure feature builder has been run successfully.")
+        return
 
     mcfg = cfg['model']
     tcfg = cfg['training']
@@ -173,7 +207,7 @@ def main():
     print(f"[Train] Input: embedding({mcfg['embedding_dim']}) + extra({mcfg.get('extra_dim', 6)}) → LSTM hidden({mcfg['lstm_hidden']})")
 
     # Model
-    model = LSTMNextEventModel(
+    model = LSTMSupervisedModel(
         vocab_size    = mcfg['vocab_size'],
         embedding_dim = mcfg['embedding_dim'],
         extra_dim     = mcfg.get('extra_dim', 6),
@@ -186,18 +220,28 @@ def main():
     print(f"[Train] Model parameters: {param_count:,}")
 
     optimizer = optim.AdamW(model.parameters(), lr=tcfg['learning_rate'], weight_decay=tcfg['weight_decay'])
-    criterion = nn.CrossEntropyLoss(ignore_index=19)  # ignore PAD
+    
+    # Loss implementation considering positive class weight
+    pos_weight_val = tcfg.get('pos_weight', 10.0)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_val]).to(device))
 
     best_val_loss    = float('inf')
     patience_counter = 0
     history          = []
 
     for epoch in range(1, tcfg['epochs'] + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss   = eval_epoch(model, val_loader, criterion, device)
+        train_loss, train_auc = train_epoch(model, train_loader, optimizer, criterion, device)
+        val_loss, val_auc     = eval_epoch(model, val_loader, criterion, device)
 
-        history.append({'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss})
-        print(f"Epoch {epoch:3d}/{tcfg['epochs']} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f}")
+        history.append({
+            'epoch': epoch, 
+            'train_loss': train_loss, 'val_loss': val_loss,
+            'train_auc': float(train_auc), 'val_auc': float(val_auc)
+        })
+        
+        print(f"Epoch {epoch:3d}/{tcfg['epochs']} | "
+              f"train_loss={train_loss:.4f} (AUC={train_auc:.4f}) | "
+              f"val_loss={val_loss:.4f} (AUC={val_auc:.4f})")
 
         if val_loss < best_val_loss:
             best_val_loss    = val_loss
@@ -216,6 +260,7 @@ def main():
     meta = {
         'best_val_loss':   best_val_loss,
         'epochs_trained':  len(history),
+        'model_architecture': 'LSTMSupervisedModel',
         'model_config':    mcfg,
         'training_config': tcfg,
         'history':         history,
@@ -230,7 +275,6 @@ def main():
 
     print(f"\n[Train] Done. Best val_loss={best_val_loss:.4f}")
     print(f"[Train] Artifacts saved to {model_dir}/")
-    print(f"[Train] NOTE: Run score_batch.py to recalibrate thresholds after training.")
 
 if __name__ == '__main__':
     main()

@@ -13,6 +13,17 @@ interface DashboardStats {
     warns: number
     stepUps: number
     revokes: number
+    mlMetrics?: {
+        roc_auc: number
+        f1_score: number
+        precision: number
+        recall: number
+        fpr: number
+        tn: number
+        fp: number
+        fn: number
+        tp: number
+    }
     recentEvents: Array<{
         sessionId: string
         eventType: string
@@ -100,6 +111,27 @@ export default function SecurityDashboardPage() {
         },
     ]
 
+    if (stats.mlMetrics) {
+        metricCards.push({
+            title: 'Model AUC',
+            value: stats.mlMetrics.roc_auc.toFixed(3),
+            icon: <Activity className="h-5 w-5 text-indigo-400" />,
+            color: 'text-indigo-400',
+        });
+        metricCards.push({
+            title: 'Model F1',
+            value: stats.mlMetrics.f1_score.toFixed(3),
+            icon: <Activity className="h-5 w-5 text-indigo-400" />,
+            color: 'text-indigo-400',
+        });
+        metricCards.push({
+            title: 'Precision / Recall',
+            value: `${stats.mlMetrics.precision.toFixed(2)} / ${stats.mlMetrics.recall.toFixed(2)}`,
+            icon: <Activity className="h-5 w-5 text-indigo-400" />,
+            color: 'text-indigo-400',
+        });
+    }
+
     const eventBadgeColor: Record<string, string> = {
         AUTH_LOGIN_SUCCESS: 'bg-green-900 text-green-300',
         AUTH_LOGOUT: 'bg-gray-700 text-gray-300',
@@ -149,6 +181,35 @@ export default function SecurityDashboardPage() {
                     </Card>
                 ))}
             </div>
+
+            {/* Confusion Matrix Panel */}
+            {stats.mlMetrics && (
+                <Card className="border-border/50">
+                    <CardHeader>
+                        <CardTitle className="text-base">Evaluation Confusion Matrix (Test Set | Threshold = 0.50)</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="grid grid-cols-2 gap-4 max-w-lg text-center">
+                            <div className="bg-muted/30 p-4 rounded border border-border/50">
+                                <div className="text-xs text-muted-foreground mb-1">True Negatives (NORMAL)</div>
+                                <div className="text-2xl font-bold">{stats.mlMetrics.tn}</div>
+                            </div>
+                            <div className="bg-red-900/20 p-4 rounded border border-red-900/50">
+                                <div className="text-xs text-red-400 mb-1">False Positives (Type I Er.)</div>
+                                <div className="text-2xl font-bold text-red-500">{stats.mlMetrics.fp}</div>
+                            </div>
+                            <div className="bg-red-900/20 p-4 rounded border border-red-900/50">
+                                <div className="text-xs text-red-400 mb-1">False Negatives (Type II Er.)</div>
+                                <div className="text-2xl font-bold text-red-500">{stats.mlMetrics.fn}</div>
+                            </div>
+                            <div className="bg-green-900/20 p-4 rounded border border-green-900/50">
+                                <div className="text-xs text-green-400 mb-1">True Positives (ATTACK)</div>
+                                <div className="text-2xl font-bold text-green-500">{stats.mlMetrics.tp}</div>
+                            </div>
+                        </div>
+                    </CardContent>
+                </Card>
+            )}
 
             {/* Recent Events Table */}
             <Card className="border-border/50">

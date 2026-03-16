@@ -1,57 +1,122 @@
 """
-M5 – Evaluation Script (ROC-AUC, PR-AUC, FPR, Detection Rate, Time-to-Detect)
-Requires labeled attack data. Normal = label 0, Attack = label 1.
+M5 – Supervised Evaluation Script (ROC-AUC, PR-AUC, FPR, F1, Confusion Matrix)
+Evalutes the `best_model.pt` predictions against the test dataset windows.
 
 Usage:
-  python evaluate.py [--config config.yaml] [--normal test] [--attack-csv path/to/attack_scores.csv]
+  python evaluate.py [--config config.yaml]
 """
 
 import argparse
 import json
+import os
 from pathlib import Path
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
-import yaml
-from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve
+import torch
+from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+from sklearn.metrics import (
+    roc_auc_score, f1_score, precision_score, recall_score, 
+    confusion_matrix, ConfusionMatrixDisplay, roc_curve, precision_recall_curve
+)
+import yaml
 
+from train import SessionDataset, LSTMSupervisedModel, load_config
 
-def load_config(path="config.yaml"):
-    with open(path) as f:
-        return yaml.safe_load(f)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', default='config.yaml')
+    args = parser.parse_args()
 
+    cfg = load_config(args.config)
+    report_dir = Path(cfg.get('artifacts', {}).get('report_dir', 'artifacts/reports'))
+    model_dir  = Path(cfg.get('artifacts', {}).get('model_dir', 'artifacts/models'))
+    data_dir   = Path(cfg.get('artifacts', {}).get('dataset_dir', 'artifacts/datasets'))
+    report_dir.mkdir(parents=True, exist_ok=True)
 
-def evaluate(normal_scores, attack_scores, report_dir, T_warn, T_block):
-    """Full evaluation: ROC-AUC, PR-AUC, FPR, recall, time-to-detect."""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Load test dataset
+    test_ds_path = data_dir / 'dataset_test.npz'
+    if not test_ds_path.exists():
+        print(f"ERROR: Test dataset not found at {test_ds_path}")
+        return
+        
+    test_ds = SessionDataset(test_ds_path)
+    test_loader = DataLoader(test_ds, batch_size=128, shuffle=False)
+
+    mcfg = cfg['model']
+    model = LSTMSupervisedModel(
+        vocab_size    = mcfg['vocab_size'],
+        embedding_dim = mcfg['embedding_dim'],
+        extra_dim     = mcfg.get('extra_dim', 6),
+        hidden_size   = mcfg['lstm_hidden'],
+        num_layers    = mcfg['lstm_layers'],
+        dropout       = 0.0,
+    ).to(device)
+
+    model_path = model_dir / 'best_model.pt'
+    if not model_path.exists():
+        print(f"ERROR: Model not found at {model_path}")
+        return
+
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+    model.eval()
+
+    all_preds = []
+    all_labels = []
+
+    print("[Evaluate] Running inference on test set...")
+    with torch.no_grad():
+        for X_ev, X_dt, X_flags, y in test_loader:
+            X_ev, X_dt, X_flags = X_ev.to(device), X_dt.to(device), X_flags.to(device)
+            x_cont = torch.cat([X_dt, X_flags], dim=-1)
+            logits = model(X_ev, x_cont)
+            probs = torch.sigmoid(logits).cpu().numpy()
+            all_preds.extend(probs)
+            all_labels.extend(y.numpy())
+
+    y_score = np.array(all_preds)
+    y_true = np.array(all_labels)
+
+    # Thresholds
+    thresholds_json = {
+        'WARN': 0.50,
+        'STEP_UP': 0.70,
+        'REVOKE': 0.90
+    }
     
-    # Combine
-    y_true = np.concatenate([np.zeros(len(normal_scores)), np.ones(len(attack_scores))])
-    y_score = np.concatenate([normal_scores, attack_scores])
+    y_pred_warn = (y_score >= thresholds_json['WARN']).astype(int)
 
-    roc_auc = roc_auc_score(y_true, y_score)
-    pr_auc  = average_precision_score(y_true, y_score)
-    
-    # FPR at warn threshold
-    fpr_warn  = (normal_scores > T_warn).sum() / len(normal_scores)
-    fpr_block = (normal_scores > T_block).sum() / len(normal_scores)
-    
-    # Detection rate (recall) at thresholds
-    dr_warn  = (attack_scores > T_warn).sum() / len(attack_scores)
-    dr_block = (attack_scores > T_block).sum() / len(attack_scores)
+    # Metrics
+    if len(np.unique(y_true)) > 1:
+        roc_auc = roc_auc_score(y_true, y_score)
+        f1 = f1_score(y_true, y_pred_warn)
+        prec = precision_score(y_true, y_pred_warn, zero_division=0)
+        rec = recall_score(y_true, y_pred_warn, zero_division=0)
+        cm = confusion_matrix(y_true, y_pred_warn)
+        tn, fp, fn, tp = cm.ravel()
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+        fnr = fn / (fn + tp) if (fn + tp) > 0 else 0
+    else:
+        # Edge case: no attack data in test set
+        print("WARNING: Only one class present in test set. AUROC cannot be calculated.")
+        roc_auc = f1 = prec = rec = fpr = fnr = 0.0
+        cm = confusion_matrix(y_true, y_pred_warn, labels=[0, 1])
 
     metrics = {
-        'roc_auc':   round(float(roc_auc), 4),
-        'pr_auc':    round(float(pr_auc), 4),
-        'fpr_at_T_warn':  round(float(fpr_warn), 4),
-        'fpr_at_T_block': round(float(fpr_block), 4),
-        'detection_rate_at_T_warn':  round(float(dr_warn), 4),
-        'detection_rate_at_T_block': round(float(dr_block), 4),
-        'n_normal': int(len(normal_scores)),
-        'n_attack': int(len(attack_scores)),
-        'T_warn':   round(float(T_warn), 4),
-        'T_block':  round(float(T_block), 4),
+        'roc_auc': round(float(roc_auc), 4),
+        'f1_score': round(float(f1), 4),
+        'precision': round(float(prec), 4),
+        'recall': round(float(rec), 4),
+        'fpr': round(float(fpr), 4),
+        'fnr': round(float(fnr), 4),
+        'tn': int(tn), 'fp': int(fp), 'fn': int(fn), 'tp': int(tp),
+        'n_test_samples': len(y_true),
+        'n_attack': int(sum(y_true)),
+        'n_normal': int(len(y_true) - sum(y_true)),
         'evaluated_at': datetime.utcnow().isoformat(),
     }
 
@@ -59,104 +124,49 @@ def evaluate(normal_scores, attack_scores, report_dir, T_warn, T_block):
     for k, v in metrics.items():
         print(f"  {k}: {v}")
 
-    # ROC Curve
-    fpr_vals, tpr_vals, _ = roc_curve(y_true, y_score)
-    plt.figure(figsize=(6, 5))
-    plt.plot(fpr_vals, tpr_vals, label=f'LSTM (AUC={roc_auc:.3f})')
-    plt.plot([0,1],[0,1],'--', color='gray', label='Random')
-    plt.axvline(x=fpr_warn, color='orange', linestyle=':', label=f'T_warn FPR={fpr_warn:.3f}')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('ROC Curve – Session Hijacking Detection')
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(report_dir / 'roc_curve.png', dpi=150)
+    # Confusion Matrix Plot
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['NORMAL', 'ATTACK'])
+    disp.plot(cmap='Blues', values_format='d')
+    plt.title('Confusion Matrix (Threshold=0.5)')
+    plt.savefig(report_dir / 'confusion_matrix.png', dpi=150)
     plt.close()
 
-    # PR Curve
-    prec, rec, _ = precision_recall_curve(y_true, y_score)
-    plt.figure(figsize=(6, 5))
-    plt.plot(rec, prec, label=f'LSTM (AP={pr_auc:.3f})')
-    plt.xlabel('Recall')
-    plt.ylabel('Precision')
-    plt.title('Precision-Recall Curve')
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(report_dir / 'pr_curve.png', dpi=150)
-    plt.close()
+    if len(np.unique(y_true)) > 1:
+        # ROC Curve
+        fpr_vals, tpr_vals, _ = roc_curve(y_true, y_score)
+        plt.figure(figsize=(6, 5))
+        plt.plot(fpr_vals, tpr_vals, label=f'LSTM (AUC={roc_auc:.3f})')
+        plt.plot([0,1],[0,1],'--', color='gray', label='Random')
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curve – Supervised Classification')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(report_dir / 'roc_curve.png', dpi=150)
+        plt.close()
 
-    # Score distributions
-    plt.figure(figsize=(7, 4))
-    plt.hist(normal_scores, bins=50, alpha=0.6, color='steelblue', label='Normal')
-    plt.hist(attack_scores, bins=50, alpha=0.6, color='tomato', label='Attack')
-    plt.axvline(T_warn,  color='orange', linestyle='--', label=f'T_warn={T_warn:.3f}')
-    plt.axvline(T_block, color='red',    linestyle='--', label=f'T_block={T_block:.3f}')
-    plt.xlabel('Anomaly Score')
-    plt.ylabel('Count')
-    plt.title('Score Distribution: Normal vs Attack')
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(report_dir / 'score_distribution.png', dpi=150)
-    plt.close()
+        # PR Curve
+        prec_vals, rec_vals, _ = precision_recall_curve(y_true, y_score)
+        plt.figure(figsize=(6, 5))
+        plt.plot(rec_vals, prec_vals, label=f'LSTM (F1={f1:.3f})')
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.title('Precision-Recall Curve')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(report_dir / 'pr_curve.png', dpi=150)
+        plt.close()
 
-    print(f"\n[Evaluate] Figures saved to {report_dir}/")
-    return metrics
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', default='config.yaml')
-    parser.add_argument('--normal-csv', default=None,
-                        help='CSV with window_score column for normal sessions')
-    parser.add_argument('--attack-csv', default=None,
-                        help='CSV with window_score column for attack sessions')
-    args = parser.parse_args()
-
-    cfg = load_config(args.config)
-    report_dir = Path(cfg['artifacts']['report_dir'])
-    model_dir  = Path(cfg['artifacts']['model_dir'])
-    report_dir.mkdir(parents=True, exist_ok=True)
-
-    # Load thresholds
-    thresholds_path = model_dir / 'thresholds.json'
-    if not thresholds_path.exists():
-        print("ERROR: Run score_batch.py first to generate thresholds.json")
-        return
-    with open(thresholds_path) as f:
-        thresholds = json.load(f)
-    T_warn  = thresholds['T_warn']
-    T_block = thresholds['T_block']
-
-    # Load scores – support CSV from score_batch.py or manual provide
-    if args.normal_csv:
-        normal_df = pd.read_csv(args.normal_csv)
-        normal_scores = normal_df['window_score'].values
-    else:
-        # Try to load from default batch output
-        csvs = sorted(report_dir.glob('batch_scores_test_*.csv'))
-        if not csvs:
-            print("ERROR: No score CSV found. Run score_batch.py first.")
-            return
-        df = pd.read_csv(csvs[-1])
-        normal_scores = df['window_score'].values
-        print(f"[Evaluate] Loaded normal scores from {csvs[-1]}")
-
-    if args.attack_csv:
-        attack_df = pd.read_csv(args.attack_csv)
-        attack_scores = attack_df['window_score'].values
-    else:
-        # Synthetic attack dataset: perturb normal scores upward to simulate hijacking
-        print("[Evaluate] No attack CSV provided. Generating synthetic attack scores for demo...")
-        attack_scores = normal_scores * np.random.uniform(1.5, 3.0, len(normal_scores))
-
-    metrics = evaluate(normal_scores, attack_scores, report_dir, T_warn, T_block)
-
-    # Save report
-    out = report_dir / f'evaluation_report_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json'
+    # Save metrics
+    out = report_dir / 'metrics_test.json'
     with open(out, 'w') as f:
         json.dump(metrics, f, indent=2)
-    print(f"[Evaluate] Report saved → {out}")
+        
+    # Save predictions
+    df_preds = pd.DataFrame({'y_true': y_true, 'y_score': y_score})
+    df_preds.to_csv(report_dir / 'predictions.csv', index=False)
 
+    print(f"\n[Evaluate] Report & plots saved to {report_dir}/")
 
 if __name__ == '__main__':
     main()
