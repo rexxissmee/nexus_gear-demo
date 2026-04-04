@@ -17,7 +17,8 @@
     "REQUEST_BURST": 15,
     "STEP_UP_REQUIRED": 16,
     "STEP_UP_PASSED": 17,
-    "SESSION_ANOMALY_WARN": 18,
-    "<PAD>": 19,
-    "<UNK>": 20
+    "STEP_UP_FAILED": 18,
+    "ADMIN_SESSION_LABEL": 19,
+    "<PAD>": 20,
+    "<UNK>": 21
 }

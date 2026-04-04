@@ -57,7 +57,7 @@ function SessionGuard() {
 
 // ── Security Monitor ───────────────────────────────────────────────────────────
 // Detects anomalous client behavior (idle, burst, navigation) and scores via LSTM.
-// Reacts to policy decisions: WARN (toast), STEP_UP (dialog), REVOKE (force logout).
+// Reacts to policy decisions: STEP_UP (dialog), REVOKE (force logout).
 function SecurityMonitor() {
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
   const logout = useAuthStore(s => s.logout)
@@ -68,14 +68,7 @@ function SecurityMonitor() {
   const { toast } = useToast()
 
   const handleDecision = (result: ScoreResult) => {
-    if (result.decision === 'WARN') {
-      toast({
-        title: 'Unusual activity detected',
-        description: result.reason ?? 'Your session behaviour looks unusual.',
-        variant: 'destructive',
-        duration: 6000,
-      })
-    } else if (result.decision === 'STEP_UP') {
+    if (result.decision === 'STEP_UP') {
       setStepUp(true, result.reason)
     } else if (result.decision === 'REVOKE') {
       logout().then(() => router.replace('/auth?reason=session_revoked'))

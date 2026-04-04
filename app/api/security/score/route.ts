@@ -3,9 +3,22 @@ import { evaluatePolicy, ruleBasedScore, DEFAULT_POLICY } from '@/lib/policy-eng
 import { EVENT_VOCAB } from '@/lib/event-logger'
 import { spawn } from 'child_process'
 import path from 'path'
+import fs from 'fs'
 
 // Force Node.js runtime (child_process + path not available on Edge)
 export const runtime = 'nodejs'
+
+/** Read scoring mode from security_config.json written by /api/security/scoring-mode */
+function getGlobalScoringMode(): 'lstm' | 'rule_based' {
+    try {
+        const configPath = path.join(process.cwd(), 'security_config.json')
+        if (fs.existsSync(configPath)) {
+            const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
+            if (cfg.scoringMode === 'rule_based') return 'rule_based'
+        }
+    } catch { /* default to lstm */ }
+    return 'lstm'
+}
 
 /**
  * POST /api/security/score
@@ -28,36 +41,48 @@ export async function POST(request: NextRequest) {
         const body = await request.json()
         const { events = [], use_rule_based = false } = body
 
-        // --- Rule-based flags summary ---
+        // Rule-based flags summary — count occurrences across window, not just presence
+        // This prevents a single flag event from trivially crossing the threshold
+        const windowLen = events.length || 1
+        const countFlag = (key: string) =>
+            events.reduce((n: number, e: Record<string, unknown>) =>
+                n + (((e.flags as Record<string, number>)?.[key] ?? 0) > 0 ? 1 : 0), 0)
+        const countType = (type: string) =>
+            events.filter((e: Record<string, unknown>) => e.event_type === type).length
+
         const flagsSummary = {
-            ip_change: events.some((e: Record<string, unknown>) => (e.flags as Record<string, number>)?.ip_change) ? 1 : 0,
-            ua_change: events.some((e: Record<string, unknown>) => (e.flags as Record<string, number>)?.ua_change) ? 1 : 0,
-            device_change: events.some((e: Record<string, unknown>) => (e.flags as Record<string, number>)?.device_change) ? 1 : 0,
-            status_401: events.some((e: Record<string, unknown>) => e.event_type === 'STATUS_401') ? 1 : 0,
-            status_403: events.some((e: Record<string, unknown>) => e.event_type === 'STATUS_403') ? 1 : 0,
-            req_burst: events.some((e: Record<string, unknown>) => e.event_type === 'REQUEST_BURST') ? 1 : 0,
+            ip_change:     Math.min(countFlag('ip_change')     / windowLen, 1),
+            ua_change:     Math.min(countFlag('ua_change')     / windowLen, 1),
+            device_change: Math.min(countFlag('device_change') / windowLen, 1),
+            status_401:    Math.min(countType('STATUS_401')    / windowLen, 1),
+            status_403:    Math.min(countType('STATUS_403')    / windowLen, 1),
+            req_burst:     Math.min(countType('REQUEST_BURST') / windowLen, 1),
         }
+
+        // Determine scoring method: global config > request body override
+        const globalMode = getGlobalScoringMode()
+        const forceRuleBased = use_rule_based || globalMode === 'rule_based'
 
         let inferResult: any = { risk_score: 0 }
         let scoringMethod: string
 
-        if (use_rule_based || events.length === 0) {
+        if (forceRuleBased || events.length === 0) {
             inferResult.risk_score = ruleBasedScore(flagsSummary)
-            scoringMethod = 'rule_based'
+            scoringMethod = events.length === 0 ? 'rule_based_empty' : 'rule_based'
         } else {
             try {
                 inferResult = await callLSTMInfer(events)
                 scoringMethod = 'lstm'
             } catch (err) {
-                // Fallback to proxy if Python not available
-                console.warn('[Score] LSTM infer failed, falling back to proxy:', err)
-                inferResult.risk_score = computeProxyScore(events)
-                scoringMethod = 'proxy_fallback'
+                // Fallback to ruleBasedScore if Python not available
+                console.warn('[Score] LSTM infer failed, falling back to ruleBasedScore:', err)
+                inferResult.risk_score = ruleBasedScore(flagsSummary)
+                scoringMethod = 'rule_based_fallback'
             }
         }
 
-        // Evaluate policy (EMA + consecutive windows)
-        const policyResult = await evaluatePolicy(sessionId, inferResult.risk_score, DEFAULT_POLICY)
+        // Evaluate policy — pass mode so correct thresholds are applied
+        const policyResult = await evaluatePolicy(sessionId, inferResult.risk_score, DEFAULT_POLICY, globalMode)
 
         return NextResponse.json({
             success: true,
@@ -128,30 +153,6 @@ function callLSTMInfer(events: Array<{ event_type: string; delta_t_ms?: number }
     })
 }
 
-/**
- * Proxy anomaly score (fallback when LSTM unavailable).
- */
-function computeProxyScore(events: Array<{ event_type: string; delta_t_ms?: number }>): number {
-    const vocabSize = Object.keys(EVENT_VOCAB).length
-    if (!events.length) return 0
-
-    let total = 0
-    const eventCounts = new Map<string, number>()
-    events.forEach(e => {
-        eventCounts.set(e.event_type, (eventCounts.get(e.event_type) ?? 0) + 1)
-    })
-
-    events.forEach((e, i) => {
-        if (i === 0) return
-        const count = eventCounts.get(e.event_type) ?? 1
-        const prob = count / events.length
-        const surpriseScore = -Math.log(Math.max(prob, 1 / vocabSize))
-        const burstPenalty = (e.delta_t_ms ?? 1000) < 500 ? 0.5 : 0
-        total += surpriseScore + burstPenalty
-    })
-
-    return total / Math.max(events.length - 1, 1)
-}
 
 function getTopSurprising(events: Array<{ event_type: string }>): string[] {
     const freq = new Map<string, number>()

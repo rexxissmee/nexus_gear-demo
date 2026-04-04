@@ -2,25 +2,47 @@ import { prisma } from '@/lib/prisma'
 import { logAuditAction, logEvent } from '@/lib/event-logger'
 import { revokeSession } from '@/lib/session'
 
+import fs from 'fs'
+import path from 'path'
+
 // ==================== POLICY ENGINE CONFIG ====================
 export interface PolicyConfig {
-    warnThreshold: number       // 0.50
-    stepUpThreshold: number     // 0.70
-    revokeThreshold: number     // 0.90
+    stepUpThreshold: number     // 0.45 (from ML)
+    revokeThreshold: number     // 0.75 (from ML)
     emaAlpha: number            // β: EMA smoothing (e.g. 0.3)
-    warnConsecutive: number     // consecutive windows to trigger WARN
     stepUpConsecutive: number   // consecutive windows to trigger STEP_UP
     revokeConsecutive: number   // consecutive windows to trigger REVOKE
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
-    warnThreshold: 0.50,
-    stepUpThreshold: 0.70,
-    revokeThreshold: 0.90,
+    stepUpThreshold: 0.45,
+    revokeThreshold: 0.75,
     emaAlpha: 0.3,
-    warnConsecutive: 1,
     stepUpConsecutive: 2,
     revokeConsecutive: 3,
+}
+
+// Lấy threshold theo mode đang active
+export function getModelThresholds(mode: 'lstm' | 'rule_based' = 'lstm') {
+    if (mode === 'rule_based') {
+        // Rule-Based score đã được normalize [0,1] (/ MAX_RULE 11.5).
+        // Ngưỡng từ evaluate.py threshold_sweep_rule.json:
+        //   step_up=0.30 → precision=0.85, recall=0.53
+        //   revoke =0.55 → precision cao hơn, conservative
+        return { stepUp: 0.30, revoke: 0.55 }
+    }
+    // LSTM: đọc file calibrated từ train pipeline (step_up=0.3, revoke=0.5)
+    try {
+        const tPath = path.join(process.cwd(), 'ml/artifacts/models/thresholds.json')
+        if (fs.existsSync(tPath)) {
+            const data = JSON.parse(fs.readFileSync(tPath, 'utf-8'))
+            return {
+                stepUp: data.step_up ?? 0.45,
+                revoke: data.revoke ?? 0.75
+            }
+        }
+    } catch (e) { }
+    return { stepUp: 0.45, revoke: 0.75 }
 }
 
 // In-memory EMA and consecutive states (per session)
@@ -28,13 +50,12 @@ export const DEFAULT_POLICY: PolicyConfig = {
 const emaCache = new Map<string, number>()
 
 interface SessionViolationState {
-    warnCount: number;
     stepUpCount: number;
     revokeCount: number;
 }
 const consecutiveCache = new Map<string, SessionViolationState>()
 
-export type PolicyDecision = 'NONE' | 'WARN' | 'STEP_UP' | 'REVOKE'
+export type PolicyDecision = 'NONE' | 'STEP_UP' | 'REVOKE'
 
 export interface PolicyResult {
     decision: PolicyDecision
@@ -46,63 +67,59 @@ export interface PolicyResult {
 /**
  * Evaluate a window sequence probability score through the policy engine.
  * Updates EMA state and applies consecutive-window thresholding.
+ * @param scoringMode - 'lstm' uses calibrated ML thresholds; 'rule_based' uses separate thresholds
  */
 export async function evaluatePolicy(
     sessionId: string,
     windowScore: number,
-    config: PolicyConfig = DEFAULT_POLICY
+    config: PolicyConfig = DEFAULT_POLICY,
+    scoringMode: 'lstm' | 'rule_based' = 'lstm'
 ): Promise<PolicyResult> {
+    const thr = getModelThresholds(scoringMode)
+    const activeConfig = {
+        ...config,
+        stepUpThreshold: thr.stepUp,
+        revokeThreshold: thr.revoke
+    }
+
     // EMA smoothing: R_t = β * R_{t-1} + (1 - β) * S_window
     const prevEma = emaCache.get(sessionId) ?? windowScore
-    const riskEma = config.emaAlpha * prevEma + (1 - config.emaAlpha) * windowScore
+    const riskEma = activeConfig.emaAlpha * prevEma + (1 - activeConfig.emaAlpha) * windowScore
     emaCache.set(sessionId, riskEma)
 
-    const state = consecutiveCache.get(sessionId) ?? { warnCount: 0, stepUpCount: 0, revokeCount: 0 }
+    const state = consecutiveCache.get(sessionId) ?? { stepUpCount: 0, revokeCount: 0 }
 
-    if (riskEma >= config.revokeThreshold) {
+    if (riskEma >= activeConfig.revokeThreshold) {
         state.revokeCount++
         state.stepUpCount++
-        state.warnCount++
-    } else if (riskEma >= config.stepUpThreshold) {
+    } else if (riskEma >= activeConfig.stepUpThreshold) {
         state.revokeCount = 0
         state.stepUpCount++
-        state.warnCount++
-    } else if (riskEma >= config.warnThreshold) {
-        state.revokeCount = 0
-        state.stepUpCount = 0
-        state.warnCount++
     } else {
         state.revokeCount = 0
         state.stepUpCount = 0
-        state.warnCount = 0
     }
-    
+
     consecutiveCache.set(sessionId, state)
 
     let decision: PolicyDecision = 'NONE'
     let reason: string | undefined
 
-    if (state.revokeCount >= config.revokeConsecutive) {
+    if (state.revokeCount >= activeConfig.revokeConsecutive) {
         decision = 'REVOKE'
-        reason = `Risk EMA ${riskEma.toFixed(3)} >= ${config.revokeThreshold} for ${state.revokeCount} consecutive windows`
+        reason = `Risk EMA ${riskEma.toFixed(3)} >= ${activeConfig.revokeThreshold} for ${state.revokeCount} consecutive windows`
         consecutiveCache.delete(sessionId)
         emaCache.delete(sessionId)
         // Auto-revoke
         await revokeSession(sessionId, reason)
-    } else if (state.stepUpCount >= config.stepUpConsecutive) {
+    } else if (state.stepUpCount >= activeConfig.stepUpConsecutive) {
         decision = 'STEP_UP'
-        reason = `Risk EMA ${riskEma.toFixed(3)} >= ${config.stepUpThreshold} for ${state.stepUpCount} consecutive windows`
-    } else if (state.warnCount >= config.warnConsecutive) {
-        decision = 'WARN'
-        reason = `Risk EMA ${riskEma.toFixed(3)} >= ${config.warnThreshold} for ${state.warnCount} consecutive windows`
+        reason = `Risk EMA ${riskEma.toFixed(3)} >= ${activeConfig.stepUpThreshold} for ${state.stepUpCount} consecutive windows`
     }
 
     // Log audit if action needed
     if (decision !== 'NONE') {
         await logAuditAction(sessionId, decision, reason, windowScore, riskEma)
-        if (decision === 'WARN') {
-            await logEvent(sessionId, 'SESSION_ANOMALY_WARN', {}, { req_rate_10s: 0 }, {})
-        }
     }
 
     return { decision, anomalyScore: windowScore, riskEma, reason }
@@ -110,24 +127,30 @@ export async function evaluatePolicy(
 
 /**
  * Simple rule-based anomaly score (baseline to compare against LSTM).
- * Returns a score [0, ∞) based on flag patterns.
+ * Returns a normalized score [0, 1] — consistent with evaluate.py (MAX_RULE = 13.0).
  */
+const RULE_MAX_SCORE = 13.0
+
 export function ruleBasedScore(flags: {
     ip_change?: number
     ua_change?: number
     device_change?: number
+    geo_change?: number
     status_401?: number
     status_403?: number
     req_burst?: number
+    api_sensitive?: number
 }): number {
-    let score = 0
-    if (flags.ip_change) score += 2.0
-    if (flags.ua_change) score += 1.5
-    if (flags.device_change) score += 2.5
-    if (flags.status_401) score += 1.0
-    if (flags.status_403) score += 1.2
-    if (flags.req_burst) score += 1.8
-    return score
+    let raw = 0
+    if (flags.ip_change) raw += 2.0
+    if (flags.ua_change) raw += 1.5
+    if (flags.device_change) raw += 2.5
+    if (flags.geo_change) raw += 1.5
+    if (flags.status_401) raw += 1.0
+    if (flags.status_403) raw += 1.2
+    if (flags.req_burst) raw += 1.8
+    if (flags.api_sensitive) raw += 1.5
+    return Math.min(raw / RULE_MAX_SCORE, 1.0)
 }
 
 /**
@@ -145,11 +168,13 @@ export async function getSessionAuditLog(sessionId: string) {
  * Get dashboard stats
  */
 export async function getSecurityDashboardStats() {
+    const synthDate = new Date('2026-02-02T00:00:00.000Z')
     const [totalSessions, revokedSessions, auditActions, recentEvents] = await Promise.all([
-        prisma.session.count(),
-        prisma.session.count({ where: { revokedAt: { not: null } } }),
-        prisma.auditLog.groupBy({ by: ['action'], _count: true }),
+        prisma.session.count({ where: { createdAt: { gt: synthDate } } }),
+        prisma.session.count({ where: { revokedAt: { not: null }, createdAt: { gt: synthDate } } }),
+        prisma.auditLog.groupBy({ by: ['action'], _count: true, where: { ts: { gt: synthDate } } }),
         prisma.sessionEvent.findMany({
+            where: { ts: { gt: synthDate } },
             orderBy: { ts: 'desc' },
             take: 100,
             select: { sessionId: true, eventType: true, deltaT_ms: true, ts: true },
@@ -161,21 +186,15 @@ export async function getSecurityDashboardStats() {
         return acc
     }, {} as Record<string, number>)
 
-    const warns       = auditCounts['WARN']    ?? 0
-    const stepUps     = auditCounts['STEP_UP'] ?? 0
-    const revokes     = auditCounts['REVOKE']  ?? 0
-    // FPR estimate = warns on non-policy-revoked sessions / total such sessions
-    const normalSessions = totalSessions - revokedSessions
-    const estimatedFpr   = normalSessions > 0 ? warns / normalSessions : 0
+    const stepUps = auditCounts['STEP_UP'] ?? 0
+    const revokes = auditCounts['REVOKE'] ?? 0
 
     return {
         totalSessions,
         activeSessions: totalSessions - revokedSessions,
         revokedSessions,
-        warns,
         stepUps,
         revokes,
-        estimatedFpr: parseFloat(estimatedFpr.toFixed(4)),
         recentEvents,
     }
 }

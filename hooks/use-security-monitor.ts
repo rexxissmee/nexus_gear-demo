@@ -8,7 +8,7 @@
  *              device change → FLAG_DEVICE_CHANGE, geo change → FLAG_GEO_CHANGE
  *  3. Persists flag events to POST /api/security/event (event store)
  *  4. Periodically scores the current window via POST /api/security/score
- *  5. Returns policy decision so the caller can react (WARN / STEP_UP / REVOKE)
+ *  5. Returns policy decision so the caller can react (STEP_UP / REVOKE)
  */
 
 import { useCallback, useEffect, useRef } from 'react'
@@ -18,7 +18,7 @@ import { usePathname } from 'next/navigation'
 const SCORE_INTERVAL_MS = 10_000   // score window every 10s
 const IDLE_TIMEOUT_MS   = 5 * 60_000  // 5 min idle → SESSION_IDLE_LONG
 const BURST_WINDOW_MS   = 3_000    // look-back window for burst detection
-const BURST_THRESHOLD   = 5        // ≥5 fetches in BURST_WINDOW_MS → REQUEST_BURST
+const BURST_THRESHOLD   = 20       // ≥20 fetches in BURST_WINDOW_MS → REQUEST_BURST
 const MAX_WINDOW_EVENTS = 30       // sliding window size (= LSTM window_length)
 
 // Storage key for device/geo fingerprint
@@ -33,7 +33,7 @@ export type SecurityEvent = {
     ts: number
 }
 
-export type PolicyDecision = 'NONE' | 'WARN' | 'STEP_UP' | 'REVOKE'
+export type PolicyDecision = 'NONE' | 'STEP_UP' | 'REVOKE'
 
 export interface ScoreResult {
     decision: PolicyDecision
@@ -145,10 +145,16 @@ export function useSecurityMonitor(opts: {
         const events = windowRef.current
         if (!events.length) return
 
+        const sessionId = document.cookie.match(/(?:^|; )session_id=([^;]+)/)?.[1]
+        if (!sessionId) return
+
         try {
             const res = await fetch('/api/security/score', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-session-id': sessionId,
+                },
                 body: JSON.stringify({
                     events: events.map(e => ({
                         event_type: e.event_type,
@@ -224,12 +230,14 @@ export function useSecurityMonitor(opts: {
     // ── Track page navigation ──────────────────────────────────────────────────
     useEffect(() => {
         if (!enabled) return
-        logFlagEvent('API_CALL_NORMAL', { navigation: 1 })
+        // Log navigation as API_CALL_NORMAL — flags empty, metrics carries route context
+        pushEvent('API_CALL_NORMAL', {})
+        persistEvent('API_CALL_NORMAL', {})
         resetIdle()
         // Re-check device/geo on every navigation (lazy SPA detection)
         checkDeviceChange()
         checkGeoChange()
-    }, [pathname, enabled, logFlagEvent, resetIdle, checkDeviceChange, checkGeoChange])
+    }, [pathname, enabled, pushEvent, persistEvent, resetIdle, checkDeviceChange, checkGeoChange])
 
     return { pushEvent, scoreWindow }
 }

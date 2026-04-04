@@ -20,7 +20,8 @@ export const EVENT_VOCAB: Record<string, number> = {
     REQUEST_BURST: 15,
     STEP_UP_REQUIRED: 16,
     STEP_UP_PASSED: 17,
-    SESSION_ANOMALY_WARN: 18,
+    STEP_UP_FAILED: 18,
+    ADMIN_SESSION_LABEL: 19,
 } as const
 
 export type EventType = keyof typeof EVENT_VOCAB
@@ -90,7 +91,7 @@ export async function logEvent(
  */
 export async function logAuditAction(
     sessionId: string,
-    action: 'WARN' | 'STEP_UP' | 'REVOKE' | 'TOKEN_ROTATE',
+    action: 'STEP_UP' | 'REVOKE' | 'TOKEN_ROTATE',
     reason?: string,
     anomalyScore?: number,
     riskEma?: number

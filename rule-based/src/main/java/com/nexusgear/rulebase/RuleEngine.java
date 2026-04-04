@@ -11,9 +11,11 @@ import java.util.*;
  *   FLAG_IP_CHANGE  → +2.0  (IP thay đổi giữa chừng = nghi ngờ cao)
  *   FLAG_UA_CHANGE  → +1.5  (User-Agent thay đổi)
  *   FLAG_DEVICE_CHANGE → +2.5  (thiết bị thay đổi)
+ *   FLAG_GEO_CHANGE → +1.5  (vị trí địa lý thay đổi)
  *   STATUS_401      → +1.0  (unauthorized request)
  *   STATUS_403      → +1.2  (forbidden request)
  *   REQUEST_BURST   → +1.8  (flood request bất thường)
+ *   API_CALL_SENSITIVE → +1.5 (gọi API nhạy cảm)
  *
  * - Window score = tổng điểm / số events (trung bình)
  *
@@ -26,17 +28,21 @@ public class RuleEngine {
     private final double wIpChange;
     private final double wUaChange;
     private final double wDeviceChange;
+    private final double wGeoChange;
     private final double wStatus401;
     private final double wStatus403;
     private final double wReqBurst;
+    private final double wSensitive;
 
     public RuleEngine(Properties config) {
         this.wIpChange     = Double.parseDouble(config.getProperty("rule.weight.ip_change", "2.0"));
         this.wUaChange     = Double.parseDouble(config.getProperty("rule.weight.ua_change", "1.5"));
         this.wDeviceChange = Double.parseDouble(config.getProperty("rule.weight.device_change", "2.5"));
+        this.wGeoChange    = Double.parseDouble(config.getProperty("rule.weight.geo_change", "1.5"));
         this.wStatus401    = Double.parseDouble(config.getProperty("rule.weight.status_401", "1.0"));
         this.wStatus403    = Double.parseDouble(config.getProperty("rule.weight.status_403", "1.2"));
         this.wReqBurst     = Double.parseDouble(config.getProperty("rule.weight.req_burst", "1.8"));
+        this.wSensitive    = Double.parseDouble(config.getProperty("rule.weight.api_sensitive", "1.5"));
     }
 
     /**
@@ -45,21 +51,20 @@ public class RuleEngine {
     public double scoreEvent(WindowExtractor.EventRecord event) {
         double score = 0.0;
 
-        // Score dựa trên event_type
-        switch (event.eventType) {
-            case "FLAG_IP_CHANGE"     -> score += wIpChange;
-            case "FLAG_UA_CHANGE"     -> score += wUaChange;
-            case "FLAG_DEVICE_CHANGE" -> score += wDeviceChange;
-            case "STATUS_401"         -> score += wStatus401;
-            case "STATUS_403"         -> score += wStatus403;
-            case "REQUEST_BURST"      -> score += wReqBurst;
-            default -> { /* Normal events: score 0 */ }
-        }
+        boolean hasIpChange = (event.eventType.equals("FLAG_IP_CHANGE") || event.flags.optInt("ip_change", 0) > 0);
+        boolean hasUaChange = (event.eventType.equals("FLAG_UA_CHANGE") || event.flags.optInt("ua_change", 0) > 0);
+        boolean hasDeviceChange = (event.eventType.equals("FLAG_DEVICE_CHANGE") || event.flags.optInt("device_change", 0) > 0);
+        boolean hasGeoChange = (event.eventType.equals("FLAG_GEO_CHANGE") || event.flags.optInt("geo_change", 0) > 0);
 
-        // Score dựa trên flags JSON (nếu event ghi flags riêng)
-        if (event.flags.optInt("ip_change", 0) > 0)     score += wIpChange;
-        if (event.flags.optInt("ua_change", 0) > 0)     score += wUaChange;
-        if (event.flags.optInt("device_change", 0) > 0) score += wDeviceChange;
+        if (hasIpChange) score += wIpChange;
+        if (hasUaChange) score += wUaChange;
+        if (hasDeviceChange) score += wDeviceChange;
+        if (hasGeoChange) score += wGeoChange;
+
+        if (event.eventType.equals("STATUS_401")) score += wStatus401;
+        if (event.eventType.equals("STATUS_403")) score += wStatus403;
+        if (event.eventType.equals("REQUEST_BURST")) score += wReqBurst;
+        if (event.eventType.equals("API_CALL_SENSITIVE")) score += wSensitive;
 
         return score;
     }

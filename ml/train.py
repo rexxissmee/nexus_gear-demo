@@ -14,7 +14,7 @@ import random
 import argparse
 import traceback
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import torch
@@ -70,11 +70,17 @@ class SessionDataset(Dataset):
         else:
             self.X_flags = torch.zeros(len(self.X_ev), self.X_ev.shape[1], NUM_FLAGS)
 
+        # metrics: shape (N, L, 3)
+        if 'X_metrics' in data:
+            self.X_metrics = torch.tensor(data['X_metrics'].astype(np.float32))
+        else:
+            self.X_metrics = torch.zeros(len(self.X_ev), self.X_ev.shape[1], 3)
+
     def __len__(self):
         return len(self.X_ev)
 
     def __getitem__(self, idx):
-        return self.X_ev[idx], self.X_dt[idx], self.X_flags[idx], self.y[idx]
+        return self.X_ev[idx], self.X_dt[idx], self.X_flags[idx], self.X_metrics[idx], self.y[idx]
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -122,11 +128,11 @@ def train_epoch(model, loader, optimizer, criterion, device):
     total_loss, total_samples = 0.0, 0
     all_preds, all_labels = [], []
     
-    for X_ev, X_dt, X_flags, y in loader:
-        X_ev, X_dt, X_flags, y = (
-            X_ev.to(device), X_dt.to(device), X_flags.to(device), y.to(device)
+    for X_ev, X_dt, X_flags, X_metrics, y in loader:
+        X_ev, X_dt, X_flags, X_metrics, y = (
+            X_ev.to(device), X_dt.to(device), X_flags.to(device), X_metrics.to(device), y.to(device)
         )
-        x_cont = torch.cat([X_dt, X_flags], dim=-1)   # (B, L, 6)
+        x_cont = torch.cat([X_dt, X_flags, X_metrics], dim=-1)   # (B, L, 9)
         
         optimizer.zero_grad()
         logits = model(X_ev, x_cont)                  # (B,)
@@ -152,11 +158,11 @@ def eval_epoch(model, loader, criterion, device):
     total_loss, total_samples = 0.0, 0
     all_preds, all_labels = [], []
     
-    for X_ev, X_dt, X_flags, y in loader:
-        X_ev, X_dt, X_flags, y = (
-            X_ev.to(device), X_dt.to(device), X_flags.to(device), y.to(device)
+    for X_ev, X_dt, X_flags, X_metrics, y in loader:
+        X_ev, X_dt, X_flags, X_metrics, y = (
+            X_ev.to(device), X_dt.to(device), X_flags.to(device), X_metrics.to(device), y.to(device)
         )
-        x_cont = torch.cat([X_dt, X_flags], dim=-1)
+        x_cont = torch.cat([X_dt, X_flags, X_metrics], dim=-1)
         logits = model(X_ev, x_cont)
         loss = criterion(logits, y)
         
@@ -265,7 +271,7 @@ def main():
         'training_config': tcfg,
         'history':         history,
         'device':          str(device),
-        'created_at':      datetime.utcnow().isoformat(),
+        'created_at':      datetime.now(timezone.utc).isoformat(),
         'seed':            cfg.get('seed', 42),
         'multimodal':      True,
         'extra_dim':       mcfg.get('extra_dim', 6),

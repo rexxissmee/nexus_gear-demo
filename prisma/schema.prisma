@@ -231,7 +231,7 @@ model SessionEvent {
 model AuditLog {
   id          Int      @id @default(autoincrement())
   sessionId   String   @map("session_id") @db.VarChar(128)
-  action      String   @db.VarChar(32)   // WARN | STEP_UP | REVOKE | TOKEN_ROTATE
+  action      String   @db.VarChar(32)   // STEP_UP | REVOKE | TOKEN_ROTATE
   reason      String?  @db.Text
   anomalyScore Float?  @map("anomaly_score")
   riskEma     Float?   @map("risk_ema")

@@ -1,58 +1,40 @@
-# ML Pipeline Config – Session Hijacking Detection MVP
-# Version: 1.0.0
-
-# Reproducibility
-seed: 42
-
-# Database (override via .env.ml or environment variable DATABASE_URL)
-database_url: ""   # set via env var DATABASE_URL
-
-# Feature Builder (M2)
+artifacts:
+  dataset_dir: artifacts/datasets
+  model_dir: artifacts/models
+  report_dir: artifacts/reports
+database_url: ''
 feature_builder:
-  window_length: 30        # L – sequence length
-  stride: 5                # sliding window stride
-  min_session_length: 5    # discard sessions shorter than this
-  dt_transform: log1p      # log(1 + delta_t_ms)
-  label_normal: 0          # label for normal sessions
-  label_attack: 1          # label for attack sessions (for eval only)
+  dt_transform: log1p
+  label_attack: 1
+  label_normal: 0
+  min_session_length: 5
   output_dir: artifacts/datasets
-
-# Model Architecture (M3)
+  stride: 5
+  window_length: 30
 model:
-  vocab_size: 21           # |V| = len(vocab.json)
+  dropout: 0.2
   embedding_dim: 64
-  extra_dim: 6             # 1 (log_dt) + 5 (flags: ip/ua/device/geo/cookie)
+  extra_dim: 9
   lstm_hidden: 256
   lstm_layers: 2
-  dropout: 0.2
-  use_dt_head: false       # optional delta_t regression head
-
-# Training (M3)
-training:
-  epochs: 30
-  batch_size: 64
-  learning_rate: 0.001
-  weight_decay: 1.0e-4
-  patience: 5              # early stopping patience
-  val_split: 0.15
-  test_split: 0.10
-  pos_weight: 10.0         # weight for positive class imbalance
-
-# Scoring (M4)
-scoring:
-  score_fn: mean           # mean or max window step score
-  alpha_dt: 0.2            # weight for time surprise
-
-# Policy Thresholds (M4 – update after calibration)
+  use_dt_head: false
+  vocab_size: 22
 policy:
-  warn_percentile: 99      # P99
-  block_percentile: 99.9   # P99.9
-  ema_alpha: 0.3           # β
-  warn_consecutive: 2
+  block_percentile: 99.9
+  ema_alpha: 0.3
   revoke_consecutive: 3
-
-# Output
-artifacts:
-  model_dir: artifacts/models
-  dataset_dir: artifacts/datasets
-  report_dir: artifacts/reports
+  step_up_consecutive: 2
+  step_up_percentile: 99
+scoring:
+  alpha_dt: 0.2
+  score_fn: mean
+seed: 42
+training:
+  batch_size: 64
+  epochs: 30
+  learning_rate: 0.001
+  patience: 5
+  pos_weight: 10.0
+  test_split: 0.1
+  val_split: 0.15
+  weight_decay: 0.0001

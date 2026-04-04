@@ -14,7 +14,7 @@ import random
 import argparse
 import traceback
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -31,9 +31,10 @@ def load_config(path: str = "config.yaml") -> dict:
 # ── Database ─────────────────────────────────────────────────────────────────
 
 def fetch_events(db_url: str, split: str = "all") -> pd.DataFrame:
-    """Load session_events from PostgreSQL."""
+    """Load session_events from PostgreSQL using raw psycopg2 cursor."""
     print(f"[FeatureBuilder] Connecting to database...")
     conn = psycopg2.connect(db_url)
+    cursor = conn.cursor()
     
     query = """
         SELECT 
@@ -45,14 +46,19 @@ def fetch_events(db_url: str, split: str = "all") -> pd.DataFrame:
             se.metrics,
             se.config,
             se.ts,
-            s.revoked_at IS NOT NULL AS is_revoked,
-            s.user_id
+            s.revoked_at IS NOT NULL AS is_revoked
         FROM session_events se
         JOIN sessions s ON se.session_id = s.session_id
+        WHERE se.event_type NOT IN ('ADMIN_SESSION_LABEL', 'TOKEN_REVOKE', 'AUTH_LOGOUT', 'STEP_UP_FAILED')
         ORDER BY se.session_id, se.ts
     """
-    df = pd.read_sql_query(query, conn)
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    columns = [desc[0] for desc in cursor.description]
+    cursor.close()
     conn.close()
+    
+    df = pd.DataFrame(rows, columns=columns)
     print(f"[FeatureBuilder] Loaded {len(df)} events from {df['session_id'].nunique()} sessions")
     return df
 
@@ -69,13 +75,24 @@ def build_features(df: pd.DataFrame, vocab: dict, cfg: dict) -> pd.DataFrame:
     df['log_dt'] = np.log1p(df['delta_t_ms'].clip(lower=0))
     
     # Expand flags (JSON column)
-    if df['flags'].dtype == object:
+    if 'flags' in df.columns and df['flags'].dtype == object:
         flags_df = pd.json_normalize(df['flags'].apply(
             lambda x: json.loads(x) if isinstance(x, str) else (x or {})
         ))
         for col in ['ip_change', 'ua_change', 'device_change', 'geo_change', 'cookie_missing']:
             df[f'flag_{col}'] = flags_df.get(col, pd.Series(0, index=df.index)).fillna(0).astype(int)
-    
+
+    # Expand metrics (JSON column)
+    if 'metrics' in df.columns and df['metrics'].dtype == object:
+        metrics_df = pd.json_normalize(df['metrics'].apply(
+            lambda x: json.loads(x) if isinstance(x, str) else (x or {})
+        ))
+        for col in ['req_rate_10s', 'status_401_count', 'status_403_count']:
+            if col in metrics_df.columns:
+                df[f'metric_{col}'] = pd.to_numeric(metrics_df[col], errors='coerce').fillna(0.0).astype(float)
+            else:
+                df[f'metric_{col}'] = 0.0
+
     return df
 
 # ── Windowing ─────────────────────────────────────────────────────────────────
@@ -92,8 +109,9 @@ def create_windows(df: pd.DataFrame, cfg: dict, attack_markers: dict) -> dict:
     
     flag_cols = ['flag_ip_change', 'flag_ua_change', 'flag_device_change', 
                  'flag_geo_change', 'flag_cookie_missing']
+    metric_cols = ['metric_req_rate_10s', 'metric_status_401_count', 'metric_status_403_count']
     
-    X_events, X_dt, X_flags = [], [], []
+    X_events, X_dt, X_flags, X_metrics = [], [], [], []
     y_labels = []
     session_ids_out = []
     
@@ -107,6 +125,7 @@ def create_windows(df: pd.DataFrame, cfg: dict, attack_markers: dict) -> dict:
         event_ids = grp['event_id'].values
         log_dts = grp['log_dt'].values
         flags = grp[[c for c in flag_cols if c in grp.columns]].values if any(c in grp.columns for c in flag_cols) else np.zeros((n, len(flag_cols)))
+        metrics_arr = grp[[c for c in metric_cols if c in grp.columns]].values if any(c in grp.columns for c in metric_cols) else np.zeros((n, len(metric_cols)))
         
         # Check if session has attack
         attack_ts = None
@@ -119,6 +138,7 @@ def create_windows(df: pd.DataFrame, cfg: dict, attack_markers: dict) -> dict:
             X_events.append(event_ids[start:end])
             X_dt.append(log_dts[start:end])
             X_flags.append(flags[start:end])
+            X_metrics.append(metrics_arr[start:end])
             
             # Labeling logic
             label = 0
@@ -136,6 +156,7 @@ def create_windows(df: pd.DataFrame, cfg: dict, attack_markers: dict) -> dict:
         'X_events':    np.array(X_events, dtype=np.int32),
         'X_dt':        np.array(X_dt, dtype=np.float32),
         'X_flags':     np.array(X_flags, dtype=np.float32),
+        'X_metrics':   np.array(X_metrics, dtype=np.float32),
         'y':           np.array(y_labels, dtype=np.float32),
         'session_ids': np.array(session_ids_out),
     }
@@ -255,7 +276,7 @@ def main():
         'val_size': len(val['X_events']),
         'test_size': len(test['X_events']),
         'num_attack_windows': int(data['y'].sum()),
-        'created_at': datetime.utcnow().isoformat(),
+        'created_at': datetime.now(timezone.utc).isoformat(),
         'seed': cfg.get('seed', 42),
     }
     with open(out_dir / 'dataset_meta.json', 'w') as f:
