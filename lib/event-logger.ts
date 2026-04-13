@@ -58,12 +58,17 @@ export async function logEvent(
     eventType: EventType,
     flags: EventFlags = {},
     metrics: EventMetrics = {},
-    config: EventConfig = {}
+    config: EventConfig = {},
+    overrideDeltaT_ms?: number,
+    overrideTs?: Date
 ): Promise<void> {
-    const now = Date.now()
+    const now = overrideTs ? overrideTs.getTime() : Date.now()
     const last = lastEventTime.get(sessionId) ?? now
-    const deltaT_ms = now - last
-    lastEventTime.set(sessionId, now)
+    const deltaT_ms = overrideDeltaT_ms ?? (now - last)
+    
+    if (!overrideTs) {
+        lastEventTime.set(sessionId, now)
+    }
 
     const eventTypeId = EVENT_VOCAB[eventType] ?? -1
 
@@ -77,7 +82,7 @@ export async function logEvent(
                 flags: flags as object,
                 metrics: metrics as object,
                 config: config as object,
-                ts: new Date(now),
+                ts: overrideTs ?? new Date(now),
             },
         })
     } catch (err) {

@@ -1,0 +1,8 @@
+{
+  "step_up": 0.8366,
+  "revoke": 0.8866,
+  "calibrated": true,
+  "source": "calibrated_supervised",
+  "calibrated_at": "2026-04-13T12:14:23.371243+00:00",
+  "n_samples": 1772
+}

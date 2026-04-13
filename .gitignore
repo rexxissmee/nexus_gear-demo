@@ -38,5 +38,9 @@ rule-based/.mvn/
 
 # Python ML artifacts
 ml/.venv/
-ml/artifacts/
 ml/__pycache__/
+ml/artifacts/*
+!ml/artifacts/models/
+ml/artifacts/models/*
+!ml/artifacts/models/best_model.pt
+!ml/artifacts/models/thresholds.json

@@ -37,35 +37,43 @@ def threshold_sweep(y_true, y_score, n_points: int = 100):
 def calibrate_supervised_thresholds(y_true, y_score):
     """
     Calibrate Step-Up and Revoke thresholds optimally:
-    - REVOKE: Maximize Precision while keeping decent Recall (e.g. target Precision >= 0.95 or max F1 if not possible)
-    - STEP_UP: Maximize F1, or target high Recall (e.g. Recall >= 0.90)
+    - REVOKE  : Highest threshold where Precision >= 0.95 and Recall >= 0.50.
+                Fallback: max F1 threshold.
+    - STEP_UP : Among all thresholds where F1 == max_F1, pick the HIGHEST one
+                (break tie high → avoid near-zero threshold from flat F1 plateau).
+                Also constrained to Recall >= 0.80.
     """
     df = threshold_sweep(y_true, y_score, 200)
-    
-    # 1. Calibrate Revoke (High Precision Mode)
-    # Try to find threshold where Precision >= 0.95
-    high_prec = df[df['precision'] >= 0.95]
-    if len(high_prec) > 0:
-        # Get the one with max recall among those that give >= 0.95 precision
-        best_revoke = high_prec.loc[high_prec['recall'].idxmax()]
-        T_revoke = best_revoke['threshold']
-    else:
-        # Fallback: Just max F1
-        best_revoke = df.loc[df['f1'].idxmax()]
-        T_revoke = best_revoke['threshold']
 
-    # 2. Calibrate Step-up (High Recall/Max F1 Mode)
-    # Find max F1
-    best_f1 = df.loc[df['f1'].idxmax()]
-    T_step_up = best_f1['threshold']
-    
-    # Ensure step_up <= revoke
-    if T_step_up > T_revoke:
-        T_step_up = T_revoke - 0.05
-        
-    print(f"[Calibrate] T_step_up = {T_step_up:.4f} (Max F1)")
-    print(f"[Calibrate] T_revoke  = {T_revoke:.4f} (High Precision)")
-    
+    # ── 1. REVOKE threshold (High Precision) ──────────────────────────────────
+    high_prec = df[(df['precision'] >= 0.95) & (df['recall'] >= 0.50)]
+    if len(high_prec) > 0:
+        # Highest threshold with precision >= 0.95 and recall >= 0.50
+        T_revoke = float(high_prec.loc[high_prec['recall'].idxmax()]['threshold'])
+    else:
+        # Fallback: max F1
+        T_revoke = float(df.loc[df['f1'].idxmax()]['threshold'])
+
+    # ── 2. STEP_UP threshold (Max F1, break tie → highest threshold) ──────────
+    max_f1 = df['f1'].max()
+    # Candidates: all rows where F1 is within 0.5% of the max
+    candidates = df[df['f1'] >= max_f1 - 0.005]
+    # Further constrain: recall must still be >= 0.80 (catch most attacks)
+    candidates_recall = candidates[candidates['recall'] >= 0.80]
+    if len(candidates_recall) > 0:
+        # Pick the highest threshold (most conservative) among valid candidates
+        T_step_up = float(candidates_recall['threshold'].max())
+    else:
+        # Recall constraint impossible — just take highest threshold w/ max F1
+        T_step_up = float(candidates['threshold'].max())
+
+    # Ensure step_up < revoke
+    if T_step_up >= T_revoke:
+        T_step_up = round(T_revoke - 0.05, 4)
+
+    print(f"[Calibrate] T_step_up = {T_step_up:.4f} (Max F1, recall>=0.80, break-tie high)")
+    print(f"[Calibrate] T_revoke  = {T_revoke:.4f} (Precision>=0.95, recall>=0.50)")
+
     return float(T_step_up), float(T_revoke)
 
 # ── Main ─────────────────────────────────────────────────────────────────────

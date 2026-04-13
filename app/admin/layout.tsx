@@ -20,7 +20,7 @@ import {
   SheetContent,
   SheetTrigger,
 } from '@/components/ui/sheet'
-import { LayoutDashboard, Package, ShoppingCart, Users, Search, Bell, Menu, LogOut, Settings, User, Tags, UserRound, ArrowLeftFromLine, Shield, FlaskConical } from 'lucide-react'
+import { LayoutDashboard, Package, ShoppingCart, Users, Search, Bell, Menu, LogOut, Settings, User, Tags, UserRound, ArrowLeftFromLine, Shield } from 'lucide-react'
 import { useAuthStore } from '@/store/auth-store'
 
 const navigationItems = [
@@ -54,11 +54,7 @@ const navigationItems = [
     href: '/admin/security',
     icon: Shield,
   },
-  {
-    name: 'Synthetic Demo',
-    href: '/admin/synthetic',
-    icon: FlaskConical,
-  },
+
 ]
 
 export default function AdminLayout({

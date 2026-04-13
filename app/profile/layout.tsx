@@ -6,7 +6,7 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
-import { LayoutDashboard, Package, User, Edit, MapPin, Heart, LogOut, Menu, Shield } from "lucide-react"
+import { LayoutDashboard, Package, User, Edit, MapPin, Heart, LogOut, Menu, Shield, FlaskConical } from "lucide-react"
 import { useAuthStore } from "@/store/auth-store"
 import { useToast } from "@/hooks/use-toast"
 
@@ -45,6 +45,11 @@ const sidebarItems = [
     title: "Security",
     href: "/profile/security",
     icon: Shield,
+  },
+  {
+    title: "Demo",
+    href: "/profile/demo",
+    icon: FlaskConical,
   },
 ]
 
